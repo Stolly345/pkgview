@@ -1,0 +1,168 @@
+# PkgView (Rust/GTK4 port)
+
+Browse and extract Sony **PS3/PSP `.pkg`** installation packages on Linux, with GNOME Files integration.
+This is a Rust/GTK 4 port of [PkgView 1.3](https://github.com/ifcaro/PkgView) (VB.NET/WinForms, 2010–2012, by Ifcaro).
+
+![PkgView browsing a package](data/screenshots/main.png)
+
+- Folder tree + file list (big icons / small icons / list / details), right-click extract
+- Details columns: Name, Size, Type, plus Offset, Key (PS3/PSP/Debug) and Flags (right-click the header);
+  click a header to sort, folders stay first; visible columns are remembered
+- **Search** (Ctrl+F): substring of the path, or `*`/`?` wildcards; results list every folder, double-click
+  jumps to the file
+- Path bar with Back / Forward / Up (Alt+←/→/↑, Backspace); keyboard shortcuts under Help → Keyboard Shortcuts
+- **Open a file** (double-click / Enter) with its default application, and **drag files out** to a file manager.
+  Both extract to `~/.cache/pkgview/open/<pid>/` first, which is deleted when PkgView exits (leftovers from a
+  crash are removed at the next start). Drag-out is capped at 512 MB: GTK 4 has no way to let the drop target
+  choose the destination, so the files are extracted when the drag starts.
+- Open Recent + a welcome page; drop one `.pkg` to open it, or several / a folder to bulk-extract them
+- **Bulk extract** (File → Bulk extract to…): pick several `.pkg` files and one destination; each goes to
+  `<dest>/<pkg name>/` with its own log. A broken package is reported at the end and doesn't stop the rest.
+- Debug and retail packages, PS3 and PSP keys
+- Properties: header fields, content ID, QA digest, SHA-1 (with **Verify**), PARAM.SFO title info, ICON0.PNG
+- GNOME Files: package icons as thumbnails; right-click *Extract Here* / *Extract To…* / *Open with PkgView*
+- Headless CLI (`info`, `list`, `extract`, `verify`), man page, bash/zsh/fish completions, `.deb` package
+
+Requirements and roadmap: [PRD.md](PRD.md).
+
+## Install
+
+Download `pkgview_<version>-1_amd64.deb` from [Releases](https://github.com/Stolly345/pkgview/releases), then:
+```sh
+sudo apt install ./pkgview_2.3.1-1_amd64.deb
+nautilus -q    # restart Files so it loads the right-click menu
+```
+Needs Debian 12+ or Ubuntu 24.04+ (GTK ≥ 4.8). The Files menu needs `python3-nautilus` (installed with the
+package unless you skip recommended packages).
+
+## Build
+
+The host only needs Docker: everything builds in a Debian 12 container (`Dockerfile.build`). Debian 12 is the
+oldest target, so the binary's glibc and GTK requirements are satisfied on Debian 12 and anything newer.
+
+```sh
+make image    # once: Debian 12 + rustup + libgtk-4-dev + cargo-deb
+make test     # unit tests
+make lint     # rustfmt + clippy -D warnings
+make deb      # → target/debian/pkgview_<ver>-1_amd64.deb
+make install  # deb + apt install
+make sample TYPE=0x80000002   # write a synthetic sample.pkg to play with
+make realtest SAMPLES=~/pkgs  # real pkgs (mounted read-only): SHA-1, PARAM.SFO, full extract to a temp dir
+make compare [SAMPLES=~/pkgs] # byte-compare with the original VB code (see Verification status)
+```
+With a local toolchain (`rustup`, `libgtk-4-dev`, `cargo install cargo-deb`) use `make deb RUN=`.
+
+## Usage
+
+```
+pkgview [FILE.pkg]                     # GUI
+pkgview info FILE.pkg                  # header / properties table
+pkgview list FILE.pkg                  # flags, size, path
+pkgview extract FILE.pkg [-o DIR]      # all, into DIR/<pkg name>/ (default DIR: next to the pkg)
+pkgview extract FILE.pkg -o DIR PATH…  # only these files/folders (paths as shown by `list`, without the root)
+pkgview verify FILE.pkg                # check trailing SHA-1
+pkgview -ex FILE.pkg                   # original PkgView's "extract here" switch
+pkgview --extract-here FILE.pkg…       # GUI progress window only, next to each file
+pkgview --extract-to FILE.pkg…         # GUI: choose a folder, then progress window only
+```
+Output layout matches the original: `DIR/<pkg name>/<root>/…` plus `DIR/<pkg name>/<pkg name>.log`
+(`[HH:MM:SS] path size bytes OK|FAILED`, then `Extraction completed.` / `Extraction cancelled.`).
+`<root>` is the content ID's middle part minus `_00`, e.g. `UP0001-NPUB12345_00-…` → `NPUB12345`.
+
+Desktop integration (GNOME Files):
+- Double-clicking a `.pkg` opens PkgView; *Tools → Associate .pkg files* makes it the default for the current user.
+- **Thumbnails**: Files shows each package's `ICON0.PNG` (or `PIC1.PNG`) as its icon
+  (`/usr/share/thumbnailers/pkgview.thumbnailer` → `pkgview thumbnail IN OUT SIZE`, no display needed).
+- **Right-click menu**: *Extract Here*, *Extract To…* and *Open with PkgView* on `.pkg` files (all selected
+  files must be packages). Needs `python3-nautilus` (a Recommends of the `.deb`) and a Files restart
+  (`nautilus -q`). Remote files (sftp, smb) are skipped.
+- `pkgview --extract-here FILE…` / `--extract-to FILE…` show only a progress window (after a folder chooser
+  for `--extract-to`) and an error dialog if a package fails; exit status 1 then. The launcher's "Extract here"
+  action and *Open With → Extract PS3 PKG here* use `--extract-here`.
+- `man pkgview`; bash, zsh and fish completions are installed with the package.
+
+## PKG format (as implemented by the original)
+
+All integers are big-endian.
+
+| Off | Size | Field (original PkgView name) |
+|---|---|---|
+| 0x00 | 4 | magic `7F 50 4B 47` |
+| 0x04 | 4 | type: `0x00000001` debug PS3, `0x80000001` retail PS3, `0x00000002` debug PSP, `0x80000002` retail PSP |
+| 0x08 | 4 | metadata offset ("Header size") |
+| 0x0C | 4 | metadata count ("Unknown 1") |
+| 0x10 | 4 | header size ("Section 2 offset") |
+| 0x14 | 4 | item count |
+| 0x18 | 8 | total size |
+| 0x20 | 8 | data offset |
+| 0x28 | 8 | data size |
+| 0x30 | 48 | content ID |
+| 0x60 | 16 | QA digest |
+| 0x70 | 16 | data RIV (counter IV) |
+| EOF−32 | 20 | SHA-1 |
+
+**Encryption** is a keystream XOR over 16-byte blocks; block *n* is at `data_offset + 16n`:
+- retail: `AES-128-ECB(key, data_riv + n)` (a 128-bit big-endian counter, i.e. AES-CTR).
+  PS3 key `2E7B71D7C9C9A14EA3221F188828B8F8`, PSP key `07F2C68290B50D2C33818D709B60E62B`
+- debug: `SHA1(K + n)[0..16]`, where `K` is a 64-byte big-endian counter laid out as
+  `qa[0..8] qa[0..8] qa[8..16] qa[8..16]` followed by 32 zero bytes
+
+**Key choice:** debug pkgs always use the SHA-1 scheme. In retail pkgs, entries whose flags have upper byte `0x90` use the PSP key and all
+others the PS3 key. The item table uses the header type's key. In retail PSP pkgs, the names of non-`0x90` entries
+are PS3-key encrypted, so the table is decrypted twice, exactly as the original does it.
+
+**Item table** at `data_offset`: `item_count` × 32-byte records `name_offset u32, name_size u32, data_offset u64,
+size u64, flags u32, pad u32` (offsets relative to `data_offset`; flags low byte `0x04` = directory), then the names.
+The first record's data offset is the size of the table plus the names.
+
+## Differences from the original
+
+- **Seeking is O(1).** The original stepped the counter block by block in a busy thread to reach a file.
+- Names are read through `name_offset`. The original assumed names are packed and 16-aligned; tests check
+  that both give the same result for packed pkgs.
+- The last partial block is handled with `ceil(size/16)` blocks. The original used rounding division plus one
+  extra block; it gives the same bytes, partly because `AESEngine` caches the first key until `free()`.
+- Untrusted input is checked: `..`, absolute paths, NUL and `\` in names are rejected, every offset is
+  bounds-checked against the file size, and `item_count` and the table size are capped before allocating.
+- The pkg is opened read-only (the original used ReadWrite). A cancelled or failed file is deleted.
+- In debug pkgs, `0x90` entries also use the SHA-1 scheme. The original ran the PSP AES key over the 64-byte debug key
+  buffer there, so its output for those entries differs (confirmed by `tools/compare-with-original.sh`). The port's
+  choice is the consistent one, but no real debug pkg with `0x90` entries was available to settle it.
+- The dead "New / Save / Save as…" menu items are gone. "Associate" uses `xdg-mime` instead of the registry.
+- The progress window does not lock the main window. The total progress bar is by bytes, not file count.
+- The app ID / desktop file is `io.github.stolly345.pkgview(.desktop)`, not `pkgview.desktop`. A GTK app ID needs a dot,
+  and on Wayland the desktop file name has to match the app ID for the window icon to show.
+- The tree's right-click menu acts on the selected folder, not the row under the pointer (GTK 4.8 has no row hit-test).
+- Type 2 (debug PSP) is rejected, like the original.
+
+## Verification status
+
+- **Checked against the original code:** `make compare` (`tools/compare-with-original.sh`) compiles the original
+  `pkgmgr.vb` / `AESEngine.vb` / `Archivo.vb` under Mono, with two mechanical edits Mono needs (see the script),
+  inside a headless harness that copies `Main.vb`'s `extractfile`. It extracts synthetic debug, retail-PS3 and
+  retail-PSP pkgs with both implementations. Result: the original lists the same names, sizes and flags; **retail
+  PS3 and retail PSP output is byte-identical**; debug differs only in the `0x90` entry (see above).
+- **Real packages** (`make realtest`, `make compare SAMPLES=…`): 3 debug PS3 pkgs (PS1 Classics, 60–365 MB,
+  16 entries each, metadata at `0xC0` and `0x280`). All three pass the SHA-1 check, their PARAM.SFO TITLE_ID
+  matches the content ID, every entry extracts at its recorded size, and the original's code produces the same
+  bytes. No retail, PSP, >4 GB or split pkgs were available.
+- The other crypto and format tests in `src/pkg.rs` run against **synthetic** pkgs built by a test-only writer
+  that uses the same keystream code. They catch regressions and bad bounds handling, not a misreading of the format.
+- **Verified:** the SHA-1 covers `[0, EOF−32)` (per psdevwiki); checked on the real packages above.
+- **Verified:** PARAM.SFO layout (little-endian `\0PSF` header, 16-byte index entries); real SFOs parse.
+- **UNVERIFIED:** key handling for `0x90` entries in debug pkgs (see Differences); none of the real samples has one.
+
+## Performance
+
+i7-1260P, NVMe, file in page cache, 1 GiB entry: **retail 1.2 s** (AES-NI, about 870 MB/s, I/O-bound); **debug 7.2 s**
+(one SHA-1 per 16-byte block, CPU-bound; could be parallelised if debug pkgs ever matter). `verify` hashes 1 GiB in 0.7 s.
+
+## Legal
+
+PkgView is not affiliated with or endorsed by Sony Interactive Entertainment. It contains no game content and
+does not decrypt EDAT/RAP-protected files; it reads package containers using the package keys that the original
+PkgView and other open-source tools have published since 2010. Only use it on packages you have the right to use.
+
+## License
+
+ISC-style, see `LICENSE`. Original © 2010-2012 Ifcaro.

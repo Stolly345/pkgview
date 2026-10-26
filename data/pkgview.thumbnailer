@@ -1,0 +1,4 @@
+[Thumbnailer Entry]
+TryExec=/usr/bin/pkgview
+Exec=/usr/bin/pkgview thumbnail %i %o %s
+MimeType=application/x-ps3-pkg;

@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=PkgView
+GenericName=PKG Viewer
+Comment=Browse and extract PS3/PSP .pkg installation packages
+Exec=pkgview %f
+Icon=pkgview
+Terminal=false
+Categories=Utility;Archiving;
+Keywords=PS3;PSP;PlayStation;pkg;extract;
+MimeType=application/x-ps3-pkg;
+Actions=extract-here;
+
+[Desktop Action extract-here]
+Name=Extract here
+Exec=pkgview --extract-here %F

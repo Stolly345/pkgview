@@ -1,0 +1,6 @@
+target/
+*.pkg
+*.PKG
+.cmp/
+.bulk/
+__pycache__/

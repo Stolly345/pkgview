@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <path d="M128 20 228 70v116l-100 50-100-50V70z" fill="#2b5797"/>
+  <path d="M128 20 228 70l-100 50L28 70z" fill="#4a7fd0"/>
+  <path d="M128 120v116l100-50V70z" fill="#1d3f70"/>
+  <path d="M78 45 178 95v40l-18 9V104L60 54z" fill="#f2c14e"/>
+  <text x="40" y="148" font-family="DejaVu Sans, sans-serif" font-weight="bold" font-size="34" fill="#fff" transform="rotate(26.6 40 148)">PKG</text>
+</svg>

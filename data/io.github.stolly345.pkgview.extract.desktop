@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Extract PS3 PKG here
+Comment=Extract the .pkg into a folder next to it, with a progress window
+Exec=pkgview --extract-here %F
+Icon=pkgview
+Terminal=false
+NoDisplay=true
+MimeType=application/x-ps3-pkg;

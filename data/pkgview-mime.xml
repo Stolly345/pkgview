@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-ps3-pkg">
+    <comment>PS3/PSP installation package</comment>
+    <generic-icon name="package-x-generic"/>
+    <!-- *.pkg is also used by macOS installers and Newton packages: the magic decides. -->
+    <magic priority="80">
+      <match type="string" offset="0" value="\x7fPKG"/>
+    </magic>
+    <glob pattern="*.pkg"/>
+  </mime-type>
+</mime-info>
