@@ -1,6 +1,7 @@
 # PkgView (Rust/GTK4 port)
 
 Browse and extract Sony **PS3/PSP `.pkg`** installation packages on Linux, with GNOME Files integration.
+**PS4** packages can be looked at and verified, but not unpacked (see [PS4 packages](#ps4-packages)).
 This is a Rust/GTK 4 port of [PkgView 1.3](https://github.com/ifcaro/PkgView) (VB.NET/WinForms, 2010–2012), written by
 **[Ifcaro](https://github.com/ifcaro)**. All credit for working out the package format and writing the original tool
 goes to him; see [Credits](#credits).
@@ -264,6 +265,27 @@ The first record's data offset is the size of the table plus the names.
   and on Wayland the desktop file name has to match the app ID for the window icon to show.
 - Type 2 (debug PSP) is rejected, like the original.
 
+## PS4 packages
+
+PS4 packages (`\x7FCNT`) open **read-only**: the title, IDs, version and PARAM.SFO, the icon and background
+images, and the other files the package stores unencrypted (`playgo-…`, `pronunciation.…`), shown under
+`sce_sys/` as on an installed game. They can be extracted, previewed and searched like any other file.
+**Verify** checks the package's three SHA-256 digests (the header up to `0xFE0`, the body, and the game image),
+which together cover the whole file, so a damaged or cut-off download is caught without the download's `.json`.
+`audit`, the library window, rename and `diff` include them; the kinds are *PS4 Game* (CATEGORY `gd`), *Patch*
+(`gp`) and *Add-on* (`ac`).
+
+What PkgView **can't** do with them: unpack the game itself, or install it anywhere. The game's files are in an
+encrypted image whose key comes from a licence tied to the PS4 account that bought it; there is no shared key as
+on the PS3. *Install to RPCS3* refuses PS4 packages (RPCS3 is a PS3 emulator).
+
+Header layout (big-endian): `0x10` entry count, `0x18` entry table offset, `0x20`/`0x28` body offset/size,
+`0x40` content ID, `0x70` DRM type, `0x74` content type, `0x160` body SHA-256, `0x410`/`0x418` game image
+offset/size, `0x430` package size, `0x440` game image SHA-256, `0xFE0` header SHA-256. Entry records are 32 bytes:
+`id, name offset, flags (bit 31 = encrypted), flags 2, offset, size` (u32 each), then 8 bytes of padding. File
+names come from the package's own name table (entry `0x200`); entries without a name (keys, licence) aren't shown.
+All of this was checked on a retail PSN package (P.T., EU): every offset, the three digests and the file list.
+
 ## Verification status
 
 - **Checked against the original code:** `make compare` (`tools/compare-with-original.sh`) compiles the original
@@ -285,6 +307,9 @@ The first record's data offset is the size of the table plus the names.
 - **Verified:** the SHA-1 covers `[0, EOF−32)` (per psdevwiki); checked on the real packages above.
 - **Verified:** PARAM.SFO layout (little-endian `\0PSF` header, 16-byte index entries); real SFOs parse.
 - **Settled from source, not a sample:** key handling for `0x90` entries in debug pkgs matches RPCS3 (see Differences).
+- **PS4 (2.8.0):** header, entry table, name table and all three digests checked on one retail PSN package
+  (a full game, 1.35 GB); `pkgview verify` takes 3.4 s on it (file in page cache). The PS4 kinds `gp` (patch)
+  and `ac` (add-on) are from documentation; only `gd` was seen on a real package.
 - **UNVERIFIED on a real package:** the metadata decoding (2.5.0). Its layout and names follow RPCS3's source and
   are unit-tested on synthetic records, but no real package with metadata was available when it was written
   (the earlier samples had metadata at `0xC0` and `0x280`; they are no longer on hand).

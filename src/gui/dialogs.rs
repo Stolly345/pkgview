@@ -1,7 +1,6 @@
 //! Properties and About windows.
 
 use super::{close_on_escape, Ui};
-use crate::pkg;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::rc::Rc;
@@ -68,15 +67,14 @@ impl Ui {
         top.append(&info);
         b.append(&top);
         b.append(&grid);
-        b.append(&line(&format!(
-            "QA digest: {}",
-            pkg::hex_spaced(&h.qa_digest)
-        )));
-        b.append(&line(&format!("SHA-1: {}", pkg::hex_spaced(&h.sha1))));
+        for (k, v) in h.digest_lines() {
+            b.append(&line(&format!("{k}: {v}")));
+        }
+        let digest = h.digest_name();
 
         let verify = gtk::Button::with_label("Verify");
         verify.set_tooltip_text(Some(
-            "Check the SHA-1 digest, and that known files (PARAM.SFO, PNG, EBOOT…) decrypt to their headers",
+            "Check the package's digests, and that known files (PARAM.SFO, PNG, EBOOT…) decrypt to their headers",
         ));
         let result = gtk::Label::new(None);
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -103,7 +101,7 @@ impl Ui {
                 .await;
                 result.set_text(&match r {
                     Ok(Ok((sha, n, bad))) => {
-                        let sha = if sha { "SHA-1 OK" } else { "SHA-1 MISMATCH" };
+                        let sha = format!("{digest} {}", if sha { "OK" } else { "MISMATCH" });
                         match (n, bad.len()) {
                             (0, _) => format!("{sha} · no known file headers to check"),
                             (n, 0) => format!("{sha} · {n} known files decrypt correctly"),

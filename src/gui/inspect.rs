@@ -59,7 +59,8 @@ enum View {
     Overview {
         icon: Option<Vec<u8>>,
         sfo: Vec<(String, String)>,
-        meta: Vec<(&'static str, String)>,
+        /// None: the package has no metadata block (PS4)
+        meta: Option<Vec<(&'static str, String)>>,
         header: Vec<(String, String)>,
     },
     File {
@@ -83,13 +84,13 @@ fn overview(p: &Pkg) -> View {
     let header = vec![
         ("Content ID".into(), h.content_id.clone()),
         ("Package type".into(), h.type_label().into()),
-        ("Files and folders".into(), h.item_count.to_string()),
+        ("Files and folders".into(), p.entries.len().to_string()),
         ("Total size".into(), pkg::round_bytes(h.total_size)),
     ];
     View::Overview {
         icon,
         sfo: p.sfo(),
-        meta: p.meta.rows(),
+        meta: p.header.ps4.is_none().then(|| p.meta.rows()),
         header,
     }
 }
@@ -99,6 +100,7 @@ fn file_view(p: &Pkg, path: &str) -> View {
         return View::Error(format!("{path} is not in the package"));
     };
     let key = match p.cipher_for(e) {
+        Cipher::None => "none (stored unencrypted)",
         Cipher::Debug => "Debug (SHA-1)",
         Cipher::Ps3 => "PS3",
         Cipher::Psp => "PSP",
@@ -277,10 +279,12 @@ impl Ui {
                     b.append(&t);
                 }
                 b.append(&grid(&header));
-                b.append(&heading("Package metadata"));
-                if meta.is_empty() {
+                if meta.is_some() {
+                    b.append(&heading("Package metadata"));
+                }
+                if meta.as_ref().is_some_and(|m| m.is_empty()) {
                     b.append(&label("No metadata records."));
-                } else {
+                } else if let Some(meta) = meta {
                     b.append(&grid(&meta));
                     let note =
                         label("Decoded as RPCS3 does; not yet checked against a real package.");

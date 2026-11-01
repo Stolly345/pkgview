@@ -17,6 +17,8 @@ pub enum Kind {
     Ps2,
     Psp,
     Minis,
+    /// PS4 game (SFO category gd)
+    Ps4,
     /// SFO category GD or the PATCH flag: updates (and the rare add-on with a PARAM.SFO)
     Patch,
     /// No PARAM.SFO and an install folder or content type "game data": DLC
@@ -35,6 +37,7 @@ impl Kind {
             Kind::Ps2 => "PS2 Classic".into(),
             Kind::Psp => "PSP".into(),
             Kind::Minis => "Minis".into(),
+            Kind::Ps4 => "PS4 Game".into(),
             Kind::Patch => "Patch".into(),
             Kind::AddOn => "Add-on".into(),
             Kind::Theme => "Theme".into(),
@@ -49,7 +52,7 @@ impl Kind {
     pub fn is_base(&self) -> bool {
         matches!(
             self,
-            Kind::Game | Kind::Ps1 | Kind::Ps2 | Kind::Psp | Kind::Minis
+            Kind::Game | Kind::Ps1 | Kind::Ps2 | Kind::Psp | Kind::Minis | Kind::Ps4
         )
     }
 
@@ -64,6 +67,10 @@ impl Kind {
             "PP" | "PE" => return Kind::Psp,
             "MN" => return Kind::Minis,
             "GD" => return Kind::Patch,
+            // PS4 categories are lower case: game, game patch, add-on
+            "gd" => return Kind::Ps4,
+            "gp" => return Kind::Patch,
+            "ac" => return Kind::AddOn,
             _ => {}
         }
         match m.content_type {

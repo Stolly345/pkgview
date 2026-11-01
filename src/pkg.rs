@@ -1,10 +1,12 @@
-//! PS3/PSP `.pkg` parsing, decryption and extraction. No UI dependencies.
+//! PS3/PSP `.pkg` parsing, decryption and extraction; PS4 `.pkg` read-only (header, plain entries). No UI
+//! dependencies.
 //!
 //! Format and crypto mirror the original PkgView (`pkgmgr.vb`); see README "PKG format".
 
 use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
 use aes::Aes128;
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use std::collections::{BTreeSet, HashSet};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
@@ -70,9 +72,26 @@ pub struct Header {
     pub content_id: String,
     pub qa_digest: [u8; 16],
     pub data_riv: [u8; 16],
-    /// The 20 bytes at EOF-32.
+    /// The 20 bytes at EOF-32. PS4: the first 20 bytes of the header SHA-256 (tells packages apart).
     pub sha1: [u8; 20],
+    pub ps4: Option<Ps4>,
 }
+
+/// PS4 (`\x7FCNT`) header fields. Layout checked on a retail PSN package: all three digests match.
+#[derive(Debug, Clone)]
+pub struct Ps4 {
+    pub content_type: u32,
+    pub drm_type: u32,
+    pub table_offset: u64,
+    /// (offset, size)
+    pub body: (u64, u64),
+    /// The encrypted game image (offset, size): the game's files, not readable without the console's keys
+    pub pfs: (u64, u64),
+    /// SHA-256 of header bytes 0..0xFE0, of the body, of the PFS image
+    pub digests: [[u8; 32]; 3],
+}
+
+const PS4_HEADER_LEN: u64 = 0x1000;
 
 impl Header {
     fn parse(raw: &[u8; HEADER_LEN], sha1: [u8; 20]) -> Header {
@@ -91,10 +110,67 @@ impl Header {
             qa_digest: raw[0x60..0x70].try_into().unwrap(),
             data_riv: raw[0x70..0x80].try_into().unwrap(),
             sha1,
+            ps4: None,
+        }
+    }
+
+    fn parse_ps4(h: &[u8]) -> Header {
+        let id = &h[0x40..0x64];
+        let id = &id[..id.iter().position(|&c| c == 0).unwrap_or(id.len())];
+        let d = |o: usize| -> [u8; 32] { h[o..o + 32].try_into().unwrap() };
+        let ps4 = Ps4 {
+            content_type: be32(h, 0x74),
+            drm_type: be32(h, 0x70),
+            table_offset: be32(h, 0x18) as u64,
+            body: (be64(h, 0x20), be64(h, 0x28)),
+            pfs: (be64(h, 0x410), be64(h, 0x418)),
+            digests: [d(0xFE0), d(0x160), d(0x440)],
+        };
+        Header {
+            pkg_type: be32(h, 0x04),
+            metadata_offset: 0,
+            metadata_count: 0,
+            header_size: PS4_HEADER_LEN as u32,
+            item_count: be32(h, 0x10),
+            total_size: be64(h, 0x430),
+            data_offset: 0,
+            data_size: ps4.body.1,
+            content_id: String::from_utf8_lossy(id).into_owned(),
+            qa_digest: [0; 16],
+            data_riv: [0; 16],
+            sha1: ps4.digests[0][..20].try_into().unwrap(),
+            ps4: Some(ps4),
+        }
+    }
+
+    /// What Verify checks, for messages: "SHA-1" or "SHA-256".
+    pub fn digest_name(&self) -> &'static str {
+        if self.ps4.is_some() {
+            "SHA-256"
+        } else {
+            "SHA-1"
+        }
+    }
+
+    /// The package's own digests, labelled, for the properties dialog and `pkgview info`.
+    pub fn digest_lines(&self) -> Vec<(&'static str, String)> {
+        match &self.ps4 {
+            Some(p) => vec![
+                ("Header SHA-256", hex(&p.digests[0])),
+                ("Body SHA-256", hex(&p.digests[1])),
+                ("Game image SHA-256", hex(&p.digests[2])),
+            ],
+            None => vec![
+                ("QA digest", hex_spaced(&self.qa_digest)),
+                ("SHA-1", hex_spaced(&self.sha1)),
+            ],
         }
     }
 
     pub fn type_label(&self) -> &'static str {
+        if self.ps4.is_some() {
+            return "PS4";
+        }
         match self.pkg_type {
             TYPE_DEBUG_PS3 => "Debug",
             TYPE_RETAIL_PS3 => "Retail",
@@ -126,6 +202,35 @@ impl Header {
     pub fn rows(&self) -> Vec<[String; 3]> {
         let h32 = |v: u32| format!("0x{v:08X}");
         let h64 = |v: u64| format!("0x{v:016X}");
+        if let Some(p) = &self.ps4 {
+            return vec![
+                ["PKG type".into(), h32(self.pkg_type), "PS4".into()],
+                ["Content type".into(), h32(p.content_type), String::new()],
+                ["DRM type".into(), h32(p.drm_type), String::new()],
+                [
+                    "Number of entries".into(),
+                    h32(self.item_count),
+                    self.item_count.to_string(),
+                ],
+                [
+                    "Total size".into(),
+                    h64(self.total_size),
+                    round_bytes(self.total_size),
+                ],
+                ["Body offset".into(), h64(p.body.0), p.body.0.to_string()],
+                ["Body size".into(), h64(p.body.1), round_bytes(p.body.1)],
+                [
+                    "Game image offset".into(),
+                    h64(p.pfs.0),
+                    p.pfs.0.to_string(),
+                ],
+                [
+                    "Game image size (encrypted)".into(),
+                    h64(p.pfs.1),
+                    round_bytes(p.pfs.1),
+                ],
+            ];
+        }
         vec![
             [
                 "PKG type".into(),
@@ -227,6 +332,8 @@ fn now_hms() -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cipher {
+    /// PS4 entries PkgView shows are stored unencrypted
+    None,
     Debug,
     Ps3,
     Psp,
@@ -252,6 +359,7 @@ impl Keystream {
             }
             Cipher::Ps3 => Keystream::Aes(Box::new(Aes128::new(&PS3_KEY.into())), h.data_riv),
             Cipher::Psp => Keystream::Aes(Box::new(Aes128::new(&PSP_KEY.into())), h.data_riv),
+            Cipher::None => unreachable!("plain entries are not decrypted"),
         }
     }
 
@@ -711,6 +819,9 @@ impl Pkg {
         }
         let mut raw = [0u8; HEADER_LEN];
         file.read_exact_at(&mut raw, 0)?;
+        if raw[0..4] == *b"\x7FCNT" {
+            return Self::open_ps4(file, len);
+        }
         if raw[0..4] != *b"\x7FPKG" {
             return Err(not_pkg());
         }
@@ -744,6 +855,91 @@ impl Pkg {
         Ok(pkg)
     }
 
+    /// PS4: the header and the entries stored unencrypted that have a name in the package's own name table
+    /// (param.sfo, icon0.png, pic0/pic1.png, playgo-…), listed under `sce_sys/` as on an installed game. The
+    /// rest (licence, keys, the game image) is encrypted with keys PkgView doesn't have, and isn't listed.
+    fn open_ps4(file: File, len: u64) -> io::Result<Pkg> {
+        if len < PS4_HEADER_LEN {
+            return Err(bad("This file is not supported."));
+        }
+        let mut h = vec![0u8; PS4_HEADER_LEN as usize];
+        file.read_exact_at(&mut h, 0)?;
+        let mut pkg = Pkg {
+            file,
+            len,
+            header: Header::parse_ps4(&h),
+            meta: Metadata::default(),
+            entries: vec![],
+        };
+        pkg.entries = pkg.read_table_ps4()?;
+        Ok(pkg)
+    }
+
+    /// Bytes `off..off+n` of the file, or a cut-off / corrupt error.
+    fn read_at(&self, off: u64, n: u64, what: &str) -> io::Result<Vec<u8>> {
+        if off.checked_add(n).is_none_or(|end| end > self.len) {
+            return Err(self.past_end(what));
+        }
+        let mut b = vec![0u8; n as usize];
+        self.file.read_exact_at(&mut b, off)?;
+        Ok(b)
+    }
+
+    fn read_table_ps4(&self) -> io::Result<Vec<Entry>> {
+        let n = self.header.item_count as u64;
+        let table = self.header.ps4.as_ref().map_or(0, |p| p.table_offset);
+        // ponytail: real packages have about 20 entries; 64k is a corrupt-header guard, not a format limit.
+        if n > 1 << 16 {
+            return Err(bad("corrupt entry table"));
+        }
+        let t = self.read_at(table, n * 32, "entry table lies outside the file")?;
+        // (id, name offset, flags, offset, size)
+        let recs: Vec<(u32, u32, u32, u64, u64)> = t
+            .chunks_exact(32)
+            .map(|r| {
+                (
+                    be32(r, 0),
+                    be32(r, 4),
+                    be32(r, 8),
+                    be32(r, 16) as u64,
+                    be32(r, 20) as u64,
+                )
+            })
+            .collect();
+        let names = match recs.iter().find(|r| r.0 == 0x200) {
+            Some(r) if r.4 <= 1 << 20 => {
+                self.read_at(r.3, r.4, "name table lies outside the file")?
+            }
+            _ => vec![],
+        };
+        let mut entries = vec![];
+        for &(_, name_off, flags, offset, size) in &recs {
+            if name_off == 0 || flags & 0x8000_0000 != 0 {
+                continue;
+            }
+            let raw = names
+                .get(name_off as usize..)
+                .map(|r| &r[..r.iter().position(|&c| c == 0).unwrap_or(r.len())])
+                .ok_or_else(|| bad("file name outside name table"))?;
+            let path = format!("sce_sys/{}", sanitize(raw)?);
+            // read_decrypt reads whole 16-byte blocks
+            if offset
+                .checked_add(size.next_multiple_of(16))
+                .is_none_or(|end| end > self.len)
+            {
+                return Err(self.past_end(&format!("{path}: data lies outside the file")));
+            }
+            entries.push(Entry {
+                path,
+                name_offset: name_off,
+                offset,
+                size,
+                flags: 0x03,
+            });
+        }
+        Ok(entries)
+    }
+
     /// An offset beyond the end: a cut-off download (UnexpectedEof) when the file is shorter than the
     /// header's total size, otherwise a corrupt package.
     fn past_end(&self, what: &str) -> io::Error {
@@ -770,6 +966,9 @@ impl Pkg {
     }
 
     pub fn cipher_for(&self, e: &Entry) -> Cipher {
+        if self.header.ps4.is_some() {
+            return Cipher::None;
+        }
         // Debug pkgs: SHA-1 keystream for every entry, as RPCS3's unpkg.cpp does (it ignores the entry key
         // there). The original used the PSP AES key for 0x90 entries even in debug pkgs.
         if self.header.pkg_type == TYPE_DEBUG_PS3 {
@@ -793,7 +992,9 @@ impl Pkg {
             })
             .ok_or_else(|| self.past_end("pkg points past the end of the file"))?;
         self.file.read_exact_at(buf, abs)?;
-        Keystream::new(&self.header, c).apply(rel / 16, buf);
+        if c != Cipher::None {
+            Keystream::new(&self.header, c).apply(rel / 16, buf);
+        }
         Ok(())
     }
 
@@ -1171,26 +1372,47 @@ impl Pkg {
         Ok(self.hashes()?.0)
     }
 
-    /// One read of the whole file: (trailing digest matches, SHA-1 of the entire file as DAT files list it).
+    /// One read of the whole file: (the package's own digests match, SHA-1 of the entire file as DAT files
+    /// list it). PS3/PSP: SHA-1 of everything before the 32-byte footer. PS4: SHA-256 of the header, the
+    /// body and the game image (together they cover the whole file).
     pub fn hashes(&self) -> io::Result<(bool, [u8; 20])> {
-        let end = self.len - FOOTER_LEN;
-        let mut h = Sha1::new();
+        let ps4 = self.header.ps4.as_ref();
+        let span = |(o, n): (u64, u64)| (o, o.saturating_add(n));
+        let ranges = match ps4 {
+            Some(p) => vec![(0, 0xFE0), span(p.body), span(p.pfs)],
+            None => vec![(0, self.len - FOOTER_LEN)],
+        };
+        let (mut whole, mut s1) = (Sha1::new(), Sha1::new());
+        let mut s256 = vec![Sha256::new(); ranges.len()];
         let mut buf = vec![0u8; CHUNK];
         let mut pos = 0;
-        while pos < end {
-            let n = (end - pos).min(CHUNK as u64) as usize;
+        while pos < self.len {
+            let n = (self.len - pos).min(CHUNK as u64) as usize;
             self.file.read_exact_at(&mut buf[..n], pos)?;
-            h.update(&buf[..n]);
+            whole.update(&buf[..n]);
+            for (i, &(start, end)) in ranges.iter().enumerate() {
+                let (a, b) = (start.max(pos), end.min(pos + n as u64));
+                if a < b {
+                    let part = &buf[(a - pos) as usize..(b - pos) as usize];
+                    match ps4 {
+                        Some(_) => s256[i].update(part),
+                        None => s1.update(part),
+                    }
+                }
+            }
             pos += n as u64;
         }
-        let mut whole = h.clone();
-        let mut tail = [0u8; FOOTER_LEN as usize];
-        self.file.read_exact_at(&mut tail, end)?;
-        whole.update(tail);
-        Ok((
-            h.finalize()[..] == self.header.sha1,
-            whole.finalize().into(),
-        ))
+        let ok = match ps4 {
+            Some(p) => {
+                ranges.iter().all(|&(_, end)| end <= self.len)
+                    && s256
+                        .into_iter()
+                        .zip(&p.digests)
+                        .all(|(h, d)| h.finalize()[..] == d[..])
+            }
+            None => s1.finalize()[..] == self.header.sha1,
+        };
+        Ok((ok, whole.finalize().into()))
     }
 
     /// RPCS3's install folder name: the metadata's install folder (DLC), else the 9 characters at header
@@ -1237,6 +1459,9 @@ impl Pkg {
             0x01, 0x02, 0x03, 0x05, 0x06, 0x09, 0x0E, 0x10, 0x11, 0x13, 0x14, 0x15, 0x16, 0x18,
             0x19,
         ];
+        if self.header.ps4.is_some() {
+            return Err(bad("this is a PS4 package: RPCS3 is a PS3 emulator"));
+        }
         if !hdd0.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -1501,6 +1726,7 @@ mod tests {
             qa_digest: *b"0123456789ABCDEF",
             data_riv: riv,
             sha1: [0; 20],
+            ps4: None,
         };
         let table_c = match pkg_type {
             TYPE_DEBUG_PS3 => Cipher::Debug,
@@ -1573,6 +1799,148 @@ mod tests {
         b.extend(keys);
         b.extend(data);
         b
+    }
+
+    /// Test-only PS4 package: 0x1000 header, body (entry table, name table, data), a noise "game image",
+    /// and the three SHA-256 digests where real packages have them. Items: (id, name or "", data, encrypted).
+    fn build_ps4(items: &[(u32, &str, Vec<u8>, bool)]) -> Vec<u8> {
+        fn put(out: &mut [u8], o: usize, b: &[u8]) {
+            out[o..o + b.len()].copy_from_slice(b);
+        }
+        let (body, n) = (0x2000usize, items.len() + 1);
+        let mut names = vec![0u8];
+        let name_offs: Vec<usize> = items
+            .iter()
+            .map(|(_, nm, _, _)| {
+                if nm.is_empty() {
+                    return 0;
+                }
+                let o = names.len();
+                names.extend_from_slice(nm.as_bytes());
+                names.push(0);
+                o
+            })
+            .collect();
+        let names_at = body + n * 32;
+        let mut cur = (names_at + names.len()).next_multiple_of(16);
+        let mut offs = vec![];
+        for (_, _, d, _) in items {
+            offs.push(cur);
+            cur = (cur + d.len()).next_multiple_of(16);
+        }
+        let body_end = cur.next_multiple_of(0x100);
+        let image = noise(0x3000, 9);
+        let mut out = vec![0u8; body_end + image.len()];
+        let total = out.len();
+        put(&mut out, 0, b"\x7FCNT");
+        put(&mut out, 4, &0x8100_0001u32.to_be_bytes());
+        put(&mut out, 0x10, &(n as u32).to_be_bytes());
+        put(&mut out, 0x18, &(body as u32).to_be_bytes());
+        put(&mut out, 0x20, &(body as u64).to_be_bytes());
+        put(&mut out, 0x28, &((body_end - body) as u64).to_be_bytes());
+        put(&mut out, 0x40, b"EP0001-CUSA00001_00-0000000000000001");
+        put(&mut out, 0x70, &0xFu32.to_be_bytes());
+        put(&mut out, 0x74, &0x1Au32.to_be_bytes());
+        put(&mut out, 0x410, &(body_end as u64).to_be_bytes());
+        put(&mut out, 0x418, &(image.len() as u64).to_be_bytes());
+        put(&mut out, 0x430, &(total as u64).to_be_bytes());
+        let rec = |id: u32, name: usize, flags: u32, off: usize, size: usize| {
+            [id, name as u32, flags, 0, off as u32, size as u32, 0, 0]
+                .iter()
+                .flat_map(|v| v.to_be_bytes())
+                .collect::<Vec<u8>>()
+        };
+        put(
+            &mut out,
+            body,
+            &rec(0x200, 0, 0x4000_0000, names_at, names.len()),
+        );
+        for (i, (id, _, d, enc)) in items.iter().enumerate() {
+            let flags = if *enc { 0x8000_0000 } else { 0 };
+            put(
+                &mut out,
+                body + (i + 1) * 32,
+                &rec(*id, name_offs[i], flags, offs[i], d.len()),
+            );
+            put(&mut out, offs[i], d);
+        }
+        put(&mut out, names_at, &names);
+        put(&mut out, body_end, &image);
+        let d = Sha256::digest(&out[body..body_end]);
+        put(&mut out, 0x160, &d);
+        put(&mut out, 0x440, &Sha256::digest(&image));
+        let d = Sha256::digest(&out[..0xFE0]);
+        put(&mut out, 0xFE0, &d);
+        out
+    }
+
+    #[test]
+    fn ps4_read_only() {
+        let d = tmp("ps4");
+        let f = d.join("ps4.pkg");
+        let mut icon = b"\x89PNG\r\n\x1a\n".to_vec();
+        icon.extend(noise(300, 3));
+        let sfo_b = sfo(&[
+            ("CATEGORY", "gd"),
+            ("TITLE", "Test"),
+            ("TITLE_ID", "CUSA00001"),
+        ]);
+        let bytes = build_ps4(&[
+            (0x400, "", noise(1024, 1), true),
+            (0x1000, "param.sfo", sfo_b, false),
+            (0x1200, "icon0.png", icon.clone(), false),
+            (0x1300, "trophy/secret.trp", noise(40, 2), true),
+        ]);
+        fs::write(&f, &bytes).unwrap();
+        let p = Pkg::open(&f).unwrap();
+        assert_eq!(p.header.type_label(), "PS4");
+        assert_eq!(p.header.content_id, "EP0001-CUSA00001_00-0000000000000001");
+        assert_eq!(p.header.root_folder(), "CUSA00001");
+        let paths: Vec<&str> = p.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(paths, ["sce_sys/param.sfo", "sce_sys/icon0.png"]);
+        assert!(p.sfo().contains(&("TITLE".into(), "Test".into())));
+        assert_eq!(p.read_entry(p.find("ICON0.PNG").unwrap()).unwrap(), icon);
+        assert_eq!(p.check_headers(), [(0, true), (1, true)]);
+        assert_eq!(p.hashes().unwrap(), (true, Sha1::digest(&bytes).into()));
+        let out = d.join("out");
+        assert!(p
+            .extract(
+                "ps4",
+                &[0, 1],
+                &out,
+                &Default::default(),
+                &AtomicBool::new(false),
+                |_| {}
+            )
+            .unwrap());
+        assert_eq!(
+            fs::read(out.join("ps4/CUSA00001/sce_sys/icon0.png")).unwrap(),
+            icon
+        );
+        let e = p
+            .install_rpcs3(&d, "00000001", &AtomicBool::new(false), |_| {})
+            .unwrap_err();
+        assert!(e.to_string().contains("PS4"), "{e}");
+        assert_eq!(
+            crate::library::Kind::of("gd", true, &p.meta),
+            crate::library::Kind::Ps4
+        );
+
+        // A changed byte anywhere (here: in the game image) fails Verify; the package still opens.
+        let mut bad = bytes.clone();
+        let l = bad.len();
+        bad[l - 5] ^= 1;
+        fs::write(&f, &bad).unwrap();
+        assert!(!Pkg::open(&f).unwrap().hashes().unwrap().0);
+        // Cut off inside the game image: opens, shorter than its total size, fails Verify.
+        fs::write(&f, &bytes[..l - 0x1000]).unwrap();
+        let p = Pkg::open(&f).unwrap();
+        assert!(p.len < p.header.total_size && !p.hashes().unwrap().0);
+        // Cut off inside the entry data: the cut-off error.
+        fs::write(&f, &bytes[..0x2100]).unwrap();
+        let e = Pkg::open(&f).err().unwrap();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{e}");
+        fs::remove_dir_all(d).unwrap();
     }
 
     fn sample_items() -> Vec<Item> {
@@ -2314,6 +2682,7 @@ mod tests {
                 k[56..].copy_from_slice(&n.to_be_bytes());
                 Sha1::digest(k)[..16].try_into().unwrap()
             }
+            Cipher::None => [0; 16],
             Cipher::Ps3 | Cipher::Psp => {
                 let key = if c == Cipher::Ps3 { PS3_KEY } else { PSP_KEY };
                 let ctr = u128::from_be_bytes(h.data_riv).wrapping_add(n as u128);

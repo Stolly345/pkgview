@@ -46,6 +46,7 @@ impl Row {
     fn entry(pkg: &Pkg, i: usize) -> Row {
         let e = &pkg.entries[i];
         let key = match pkg.cipher_for(e) {
+            Cipher::None => "none",
             Cipher::Debug => "Debug",
             Cipher::Ps3 => "PS3",
             Cipher::Psp => "PSP",

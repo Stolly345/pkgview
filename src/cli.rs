@@ -58,7 +58,7 @@ pub enum Cmd {
         /// .pkg files and/or folders (searched recursively)
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-        /// Skip the SHA-1 check (reads only headers: instant)
+        /// Skip the digest check (reads only headers: instant)
         #[arg(long, conflicts_with = "dat")]
         no_hash: bool,
         /// Also look every package up in a No-Intro / Redump DAT (Logiqx XML), by SHA-1 of the whole file
@@ -128,7 +128,7 @@ pub enum Cmd {
         #[arg(long)]
         flat: bool,
     },
-    /// Check the trailing SHA-1 and that known files (PARAM.SFO, PNG, EBOOT…) decrypt to their headers
+    /// Check the package digests (PS3/PSP SHA-1, PS4 SHA-256) and that known files decrypt to their headers
     Verify {
         #[arg(required = true)]
         files: Vec<PathBuf>,
@@ -336,7 +336,27 @@ fn info_json(p: &Pkg) -> J {
         ("metadata_count", J::N(h.metadata_count as u64)),
         ("header_size", J::N(h.header_size as u64)),
         ("qa_digest", J::s(pkg::hex(&h.qa_digest))),
-        ("sha1", J::s(pkg::hex(&h.sha1))),
+        (
+            "sha1",
+            if h.ps4.is_some() {
+                J::Null
+            } else {
+                J::s(pkg::hex(&h.sha1))
+            },
+        ),
+        (
+            "ps4",
+            match &h.ps4 {
+                Some(p) => J::o([
+                    ("content_type", J::N(p.content_type as u64)),
+                    ("drm_type", J::N(p.drm_type as u64)),
+                    ("header_sha256", J::s(pkg::hex(&p.digests[0]))),
+                    ("body_sha256", J::s(pkg::hex(&p.digests[1]))),
+                    ("image_sha256", J::s(pkg::hex(&p.digests[2]))),
+                ]),
+                None => J::Null,
+            },
+        ),
         ("metadata", J::O(meta)),
         ("sfo", J::O(sfo)),
     ])
@@ -344,6 +364,7 @@ fn info_json(p: &Pkg) -> J {
 
 fn key_name(p: &Pkg, e: &pkg::Entry) -> &'static str {
     match p.cipher_for(e) {
+        pkg::Cipher::None => "none",
         pkg::Cipher::Debug => "Debug",
         pkg::Cipher::Ps3 => "PS3",
         pkg::Cipher::Psp => "PSP",
@@ -387,7 +408,11 @@ fn verify_checks(p: &Pkg) -> anyhow::Result<(bool, usize, Vec<String>)> {
 fn verify(file: &Path, prefix: &str) -> anyhow::Result<()> {
     let p = Pkg::open(file)?;
     let (sha_ok, n_checks, bad) = verify_checks(&p)?;
-    println!("{prefix}SHA-1 {}", if sha_ok { "OK" } else { "MISMATCH" });
+    let digest = p.header.digest_name();
+    println!(
+        "{prefix}{digest} {}",
+        if sha_ok { "OK" } else { "MISMATCH" }
+    );
     match (n_checks, bad.len()) {
         (0, _) => println!("{prefix}Headers: no known files to check"),
         (n, 0) => println!("{prefix}Headers OK ({n} known files decrypt correctly)"),
@@ -397,7 +422,7 @@ fn verify(file: &Path, prefix: &str) -> anyhow::Result<()> {
         ),
     }
     if !sha_ok {
-        bail!("SHA-1 MISMATCH");
+        bail!("{digest} MISMATCH");
     }
     if !bad.is_empty() {
         bail!("{} file header(s) wrong", bad.len());
@@ -520,7 +545,11 @@ fn audit(paths: &[PathBuf], no_hash: bool, dat: Option<&Path>, json: bool) -> an
         }
     }
     if !json {
-        let checked = if no_hash { " (SHA-1 not checked)" } else { "" };
+        let checked = if no_hash {
+            " (digests not checked)"
+        } else {
+            ""
+        };
         println!(
             "\n{} package(s){checked}: {} with problems, {dups} duplicate(s), {orphans} without their game, \
              {missing} missing a licence",
@@ -602,9 +631,12 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
                 for [f, x, v] in h.rows() {
                     println!("{f:<38} {x:<20} {v}");
                 }
-                println!("Content ID  {}", h.content_id);
-                println!("QA digest   {}", pkg::hex_spaced(&h.qa_digest));
-                println!("SHA-1       {}", pkg::hex_spaced(&h.sha1));
+                let digests = h.digest_lines();
+                let w = digests.iter().map(|d| d.0.len()).max().unwrap_or(0).max(10);
+                println!("{:<w$}  {}", "Content ID", h.content_id);
+                for (k, v) in digests {
+                    println!("{k:<w$}  {v}");
+                }
                 let meta = p.meta.rows();
                 if !meta.is_empty() {
                     println!("\nPackage metadata");

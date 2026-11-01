@@ -24,7 +24,7 @@ On Linux the original Windows tool only runs under Mono: it's slow, works one fi
 **Non-goals** (decided 2026-10-25; extended 2026-10-31)
 
 - Creating or editing packages, debug or retail.
-- PS Vita, PS4 or PS5 packages; EDAT/RAP decryption. Reporting whether a `.rap` file is *present* is in scope (F27).
+- PS Vita or PS5 packages; unpacking PS4 game data (PS4 packages are read-only, F33, added 2026-11-01 at the owner's request); EDAT/RAP decryption. Reporting whether a `.rap` file is *present* is in scope (F27).
 - Packaging beyond `.deb`, `.rpm` and the Arch PKGBUILD (translations, Flatpak/AppImage, CI) until there is demand. (`.rpm` and Arch added 2026-11-01 at the owner's request.)
 - Tabs, skins, cloud or URL opening.
 - Split or multi-part packages, unless a real sample turns up.
@@ -85,9 +85,10 @@ Thirteen requirement groups shipped in 2.0–2.3; the rest land one release at a
 | F27 | Collection | `.rap` status: for packages whose DRM type needs a `.rap`, show *RAP found* / *RAP missing*, looking next to the pkg and in RPCS3's `dev_hdd0/home/00000001/exdata/`. Presence only, nothing is decrypted | Should | 2.6.0 | Shipped |
 | F28 | Files | Nautilus extension adds list-view columns (Title, Title ID, Category, Version) and a Properties tab with the SFO summary, reading `pkgview info --json`; keeps the API 4.0 / 4.1 fallback | Should | 2.6.0 | Shipped |
 | F29 | Bulk | The bulk-extract summary lists successes and failures with reasons and a **Retry failed** button. This replaces the planned queue window | Should | 2.6.0 | Shipped |
-| F30 | Hand-off | Install to RPCS3: extract a PS3 pkg into `<rpcs3>/dev_hdd0/game/<TITLE_ID>/` (path detected from RPCS3's config, overridable), GUI action + `pkgview install-rpcs3 FILE…`. Must be checked against RPCS3's own installer on a real package before release | Should | 2.7.0 | Shipped (see Checks: RPCS3 comparison not yet run) |
+| F30 | Hand-off | Install to RPCS3: extract a PS3 pkg into `<rpcs3>/dev_hdd0/game/<TITLE_ID>/` (path detected from RPCS3's config, overridable), GUI action + `pkgview install-rpcs3 FILE…`. Must be checked against RPCS3's own installer on a real package before release | Should | 2.7.0 | Shipped (RPCS3 comparison passed on the test games, 2026-11-01) |
 | F31 | CLI | `pkgview diff A.pkg B.pkg`: added / removed / changed entries by path, size, flags, optionally content hash | Could | 2.7.0 | Shipped |
 | F32 | Collection | Check packages against an offline No-Intro / Redump DAT file (`--dat FILE`) in `audit` and the library view | Could | 2.7.0 | Shipped |
+| F33 | Info | PS4 packages read-only: header, PARAM.SFO, icon and the other unencrypted `sce_sys` files (browse, preview, extract), Verify by the package's own SHA-256 digests, PS4 kinds in audit / library / rename. Not possible: unpacking the game (its image is encrypted with a per-account licence key) or installing it. *Install to RPCS3* refuses PS4 packages | Should | 2.8.0 | Shipped |
 
 ## Format and correctness
 
@@ -156,7 +157,8 @@ Output must match the original tool byte for byte on every retail package and ev
 | 2.4.0 | D | **Safety + extract:** symlink-safe writes, exit codes, >4 GiB + `0x90` checks, GTK 4.14 floor, extract dialog, key test, keep opened files until next start (F14–F19) | Shipped; published 2026-11-01 (GitHub release v2.4.0: .deb + .rpm; Arch PKGBUILD in the repo) |
 | 2.5.0 | E | **Inspect:** inspector pane + full metadata, `--json`, `cat`, parallel debug keystream (F20–F23) | Shipped (built 2026-11-01, not yet published) |
 | 2.6.0 | F | **Collection:** rename, audit, library view, `.rap` status, Files columns + Properties tab, Retry failed (F24–F29) | Shipped (built 2026-11-01, not yet published) |
-| 2.7.0 | G | **Hand-off:** install to RPCS3; diff and DAT check (F30–F32) | Shipped (built 2026-11-01, not yet published); RPCS3 comparison pending |
+| 2.7.0 | G | **Hand-off:** install to RPCS3; diff and DAT check (F30–F32) | Shipped (built 2026-11-01, not yet published); RPCS3 comparison passed |
+| 2.8.0 | H | **PS4 read-only:** open, preview, verify and catalogue PS4 packages (F33) | Shipped (built 2026-11-01, not yet published) |
 
 Each phase ships as its own installable `.deb` and must pass the acceptance list below before the next starts.
 
