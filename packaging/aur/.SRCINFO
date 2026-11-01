@@ -4,7 +4,7 @@ pkgbase = pkgview-bin
 	pkgrel = 1
 	url = https://github.com/Stolly345/pkgview
 	arch = x86_64
-	license = ISC
+	license = (MIT OR Apache-2.0) AND ISC
 	depends = gtk4
 	depends = glib2
 	depends = gdk-pixbuf2
@@ -19,6 +19,6 @@ pkgbase = pkgview-bin
 	options = !debug
 	options = !strip
 	source = https://github.com/Stolly345/pkgview/releases/download/v2.8.0/pkgview_2.8.0-1_amd64.deb
-	sha256sums = 4a75392e89bac27120ef1e9cf53e6c5b11f4c808dd908f2a8e1f097d9641da0a
+	sha256sums = 5661a65f799d3804c80b41d518a97ba9ea95a013925bc811dedf5310458641fb
 
 pkgname = pkgview-bin

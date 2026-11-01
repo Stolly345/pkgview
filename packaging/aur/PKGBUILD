@@ -8,7 +8,7 @@ pkgrel=1
 pkgdesc="Browse, verify and extract PS3/PSP .pkg installation packages (GTK 4 port of Ifcaro's PkgView)"
 arch=('x86_64')
 url="https://github.com/Stolly345/pkgview"
-license=('ISC')
+license=('(MIT OR Apache-2.0) AND ISC')
 depends=('gtk4' 'glib2' 'gdk-pixbuf2' 'pango' 'glibc' 'libgcc' 'hicolor-icon-theme')
 optdepends=('python-nautilus: Extract Here / Extract To… / Open with PkgView in the Files right-click menu'
             'xdg-utils: Tools → Associate .pkg files')
@@ -17,14 +17,17 @@ conflicts=('pkgview')
 # prebuilt, already stripped release binary
 options=('!debug' '!strip')
 source=("https://github.com/Stolly345/pkgview/releases/download/v${pkgver}/pkgview_${pkgver}-1_amd64.deb")
-sha256sums=('4a75392e89bac27120ef1e9cf53e6c5b11f4c808dd908f2a8e1f097d9641da0a')
+sha256sums=('5661a65f799d3804c80b41d518a97ba9ea95a013925bc811dedf5310458641fb')
 
 package() {
     bsdtar -xf data.tar.* -C "$pkgdir"
     cd "$pkgdir/usr/share"
     # Arch keeps licences in /usr/share/licenses and has no use for Debian's copyright file
-    install -Dm644 doc/pkgview/LICENSE "licenses/$pkgname/LICENSE"
-    rm -f doc/pkgview/LICENSE doc/pkgview/copyright
+    for f in LICENSE LICENSE-MIT LICENSE-APACHE; do
+        install -Dm644 "doc/pkgview/$f" "licenses/$pkgname/$f"
+        rm -f "doc/pkgview/$f"
+    done
+    rm -f doc/pkgview/copyright
     # zsh looks in site-functions on Arch (vendor-completions is Debian's)
     install -Dm644 zsh/vendor-completions/_pkgview zsh/site-functions/_pkgview
     rm -r zsh/vendor-completions

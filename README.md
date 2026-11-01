@@ -337,7 +337,7 @@ PkgView and other open-source tools have published since 2010. Only use it on pa
   a port of that tool. Its package parsing, the decryption scheme, the debug/retail and PS3/PSP key handling, the
   extraction layout and the log format all follow his `pkgmgr.vb` and `Main.vb`, and his code is the reference
   that every release is compared against byte for byte (`make compare`). The PS3/PSP package keys used are the
-  ones his tool published. His copyright notice is kept in `LICENSE`, in the About dialog and in every package.
+  ones his tool published. His copyright notice is kept, first, in `LICENSE`, in the About dialog and in every package.
 - The format notes are cross-checked against the [PS3 Developer Wiki](https://www.psdevwiki.com/ps3/PKG_files)
   and [RPCS3](https://github.com/RPCS3/rpcs3) (`rpcs3/Crypto/unpkg.cpp`).
 - Rust/GTK 4 port, Linux desktop integration and packaging: Alex Stoll (2026).
@@ -346,4 +346,11 @@ This port is not affiliated with Ifcaro, and he is not responsible for its bugs.
 
 ## License
 
-ISC, the original's licence; see `LICENSE`. Original © 2010–2012 Ifcaro; Rust port © 2026 Alex Stoll, same terms.
+The Rust/GTK 4 port is © 2026 Alex Stoll and licensed under either of [Apache License 2.0](LICENSE-APACHE) or
+[MIT](LICENSE-MIT), at your option. The parts that follow Ifcaro's original code (package parsing, decryption,
+key handling, extraction layout, log format) also carry his ISC notice, © 2010–2012 Ifcaro, which must be kept
+with them; see [`LICENSE`](LICENSE). SPDX: `(MIT OR Apache-2.0) AND ISC`. Both are permissive, so this is the
+same freedom as before: the ISC licence lets the port be released under MIT/Apache as long as his notice stays.
+
+Unless you explicitly state otherwise, any contribution you submit for inclusion in this project, as defined in
+the Apache-2.0 licence, is dual-licensed as above, without any additional terms or conditions.

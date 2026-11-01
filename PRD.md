@@ -141,6 +141,7 @@ Output must match the original tool byte for byte on every retail package and ev
 | Accessibility | Built in as each widget is added, not as a separate release: every action reachable by keyboard, labels and tooltips on icon buttons, usable at 200% text scale |
 | Dependencies | Rust std, gtk4-rs (with glib/gio/gdk-pixbuf), aes, sha1, clap, anyhow, libc; new crates need a stated reason (allowed: `clap_complete`, `clap_mangen`). JSON output may add `serde_json` if hand-written output proves error-prone |
 | Attribution | PkgView is a port of Ifcaro's PkgView (github.com/ifcaro/PkgView, ISC) and must say so wherever it is presented: README intro + Credits section, `LICENSE` (his notice first), About dialog, `.deb`/`.rpm` descriptions, metainfo, Arch `pkgdesc`, GitHub repo description and every release's notes. Never removed or shortened |
+| Licence | Since 2026-11-01: the port is `MIT OR Apache-2.0` (as Kestrel, FinGraph and Cadence), and Ifcaro's ISC notice stays with the parts derived from his code, first in `LICENSE`. SPDX `(MIT OR Apache-2.0) AND ISC` in Cargo.toml, the .deb/.rpm, the PKGBUILD and the metainfo. Allowed because ISC is permissive; his notice must never be dropped |
 | Settings | One file, `~/.config/pkgview/settings.ini` (view, columns, recent files, last extract options, rename template, RPCS3 path) |
 | CLI | Exit codes 0 / 1 / 2 only (F17); machine output on stdout, messages on stderr |
 

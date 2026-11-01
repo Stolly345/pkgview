@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.github.stolly345.pkgview</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>ISC</project_license>
+  <project_license>(MIT OR Apache-2.0) AND ISC</project_license>
   <name>PkgView</name>
   <summary>Browse and extract PS3/PSP .pkg installation packages</summary>
   <description>
