@@ -191,9 +191,11 @@ their own folders. Entries of type `0x04`/`0x12` are folders; only the file type
 that already exists is replaced only if the package marks its entry overwritable (flag `0x80000000`), otherwise
 kept (that's how RPCS3 keeps a game's files when a patch doesn't replace them); a new install folder is removed
 again if the install fails or is cancelled. `dev_hdd0` comes from RPCS3's `vfs.yml` (`$(EmulatorDir)` = its
-config folder), native install first, then Flatpak. **Not yet compared with RPCS3 itself:**
-`make compare-rpcs3` installs the test packages with RPCS3's own installer and with PkgView and compares the
-trees; it downloads and runs RPCS3, and hasn't been run yet.
+config folder), native install first, then Flatpak. **Compared with RPCS3 itself:**
+`make compare-rpcs3` installs the test packages with RPCS3's own installer (`rpcs3 --installpkg`) and with
+PkgView and compares the trees byte for byte. On 2026-11-01, with RPCS3 0.0.43-20550, the debug PS3, retail PS3
+and PSP test games came out identical. Not yet compared: DLC, patches over an installed game, PS1 Classics, real
+packages. `RPCS3_APPIMAGE=path` uses a local AppImage instead of downloading the latest.
 
 ## PKG format (as implemented by the original)
 

@@ -5,13 +5,14 @@
 # `rpcs3 --installpkg` and once with PkgView, and compares the two game/ trees byte for byte.
 # Exit 0 = identical for every package.
 #
-# STATUS: written for 2.7.0 but NOT RUN YET: running a downloaded emulator needs the owner's go-ahead.
-# The first run may need adjusting (RPCS3 dialogs, timing); the output says which package differs and how.
+# Last run 2026-11-01, RPCS3 0.0.43-20550-fab15ea0: all three identical.
 set -eu
 cd "$(dirname "$0")/.."
 W=target/rpcs3cmp
 rm -rf "$W" && mkdir -p "$W"
-gh release download -R RPCS3/rpcs3-binaries-linux --pattern '*linux64.AppImage' -D "$W"
+# RPCS3_APPIMAGE=path uses that AppImage instead of downloading the latest.
+if [ -n "${RPCS3_APPIMAGE:-}" ]; then cp "$RPCS3_APPIMAGE" "$W/"; else
+    gh release download -R RPCS3/rpcs3-binaries-linux --pattern '*linux64.AppImage' -D "$W"; fi
 ./run-in-docker.sh sh -c '
 set -eu
 W=target/rpcs3cmp
@@ -26,8 +27,8 @@ Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
 sleep 1
 rc=0
 for p in $W/sample-*.pkg; do
-    a=/tmp/by-rpcs3; b=/tmp/by-pkgview
-    rm -rf $a $b
+    a=/w/$W/by-rpcs3; b=/w/$W/by-pkgview  # not /tmp: RPCS3 refuses temporary locations
+    chmod -R u+rwX $a $b 2>/dev/null || true; rm -rf $a $b
     mkdir -p $a/.config/rpcs3/dev_hdd0 $b/.config/rpcs3/dev_hdd0
     HOME=$a XDG_CONFIG_HOME=$a/.config $W/squashfs-root/AppRun --installpkg "$p" >$W/rpcs3.log 2>&1 &
     R=$!
@@ -36,14 +37,15 @@ for p in $W/sample-*.pkg; do
     for _ in $(seq 90); do
         sleep 1
         xdotool key Return 2>/dev/null || true
-        now=$(cd $a/.config/rpcs3/dev_hdd0 && find game -type f -exec stat -c "%n %s" {} + 2>/dev/null | sort | md5sum)
-        if [ -d $a/.config/rpcs3/dev_hdd0/game ] && [ "$now" = "$last" ]; then same=$((same + 1)); else same=0; fi
+        now=$(cd $a/.config/rpcs3/dev_hdd0 && find game -path game/TEST12345 -prune -o -type f -exec stat -c "%n %s" {} + 2>/dev/null | sort)
+        if [ -n "$now" ] && [ "$now" = "$last" ]; then same=$((same + 1)); else same=0; fi
         last=$now
         [ $same -ge 4 ] && break
     done
     kill $R 2>/dev/null || true
     HOME=$b XDG_CONFIG_HOME=$b/.config target/debug/pkgview install-rpcs3 "$p" >/dev/null
-    if diff -r $a/.config/rpcs3/dev_hdd0/game $b/.config/rpcs3/dev_hdd0/game; then
+    # TEST12345 and ＄locks are made by RPCS3 itself on first start
+    if diff -r -x TEST12345 -x "＄locks" $a/.config/rpcs3/dev_hdd0/game $b/.config/rpcs3/dev_hdd0/game; then
         echo "$(basename $p): identical ($(find $b/.config/rpcs3/dev_hdd0/game -type f | wc -l) files)"
     else
         echo "$(basename $p): DIFFERENT (RPCS3 log: $W/rpcs3.log)"

@@ -8,3 +8,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo PATH=/opt/cargo/bin:$PATH
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -c clippy,rustfmt \
  && cargo install cargo-deb cargo-generate-rpm --locked && chmod -R a+rwX /opt/cargo /opt/rustup
+# libasound: only for `make compare-rpcs3` (the RPCS3 AppImage needs it)
+RUN apt-get update && apt-get install -y --no-install-recommends libasound2t64 && rm -rf /var/lib/apt/lists/*
