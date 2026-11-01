@@ -53,7 +53,7 @@ impl Kind {
         )
     }
 
-    fn of(category: &str, has_sfo: bool, m: &pkg::Metadata) -> Kind {
+    pub fn of(category: &str, has_sfo: bool, m: &pkg::Metadata) -> Kind {
         if m.package_flags.is_some_and(|f| f & 0x10 != 0) {
             return Kind::Patch;
         }

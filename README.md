@@ -38,8 +38,20 @@ goes to him; see [Credits](#credits).
 - Properties: header fields, content ID, QA digest, SHA-1, PARAM.SFO title info, ICON0.PNG. **Verify** checks
   the SHA-1 and that every file of a known kind (PARAM.SFO, PNG, EBOOT.BIN/SELF/SPRX, PBP, EDAT/SDAT) decrypts to
   its header, which catches a wrong key
-- GNOME Files: package icons as thumbnails; right-click *Extract Here* / *Extract To…* / *Open with PkgView*
-- Headless CLI (`info`, `list`, `cat`, `extract`, `verify`, each with several packages; `--json` for scripts),
+- **Library** (File → Open Library Folder…, Ctrl+L, or `pkgview --library DIR`): every package in a folder as a
+  table with icon, title, Title ID, kind (Game, Patch, PS1 Classic, Add-on…), version, size, status, licence and
+  notes; sort, filter, double-click to open. **Verify** checks every SHA-1 (4 at a time; results survive renames).
+  The notes say what needs attention: cut-off downloads, damaged packages (and where an intact copy is),
+  identical copies, a patch or add-on whose game isn't in the folder (patches for disc games, Title ID `B…`, are
+  not flagged), and a package that needs a licence with no `<content ID>.rap` next to it or in RPCS3.
+- **Rename** (Library → Rename…, or `pkgview rename`): readable names from a template such as
+  `{TITLE} [{TITLE_ID}] [v{APP_VER}] [{CATEGORY}]`, shown before anything changes; safe on FAT/exFAT/NTFS drives,
+  never overwrites, and every run can be undone (Undo Rename / `pkgview rename --undo`).
+- Bulk extract failures list each package with its reason and offer **Retry Failed**.
+- GNOME Files: package icons as thumbnails; right-click *Extract Here* / *Extract To…* / *Open with PkgView*;
+  **Game Title, Title ID, Package Kind and Package Version columns** and a **PkgView section in Properties**
+- Headless CLI (`info`, `list`, `cat`, `extract`, `verify`, `audit`, `rename`, each with several packages;
+  `--json` for scripts),
   man page, bash/zsh/fish completions; `.deb`, `.rpm` and Arch packages
 
 Requirements and roadmap: [PRD.md](PRD.md).
@@ -51,9 +63,9 @@ Download the package for your distro from the
 
 | Distro | Install |
 |---|---|
-| Ubuntu 24.04+, Debian 13 | `sudo apt install ./pkgview_2.5.0-1_amd64.deb` (use `apt`, not `dpkg -i`, so dependencies come too) |
-| Fedora 40+ | `sudo dnf install ./pkgview-2.5.0-1.x86_64.rpm` |
-| openSUSE Tumbleweed | `sudo zypper install --allow-unsigned-rpm ./pkgview-2.5.0-1.x86_64.rpm` |
+| Ubuntu 24.04+, Debian 13 | `sudo apt install ./pkgview_2.6.0-1_amd64.deb` (use `apt`, not `dpkg -i`, so dependencies come too) |
+| Fedora 40+ | `sudo dnf install ./pkgview-2.6.0-1.x86_64.rpm` |
+| openSUSE Tumbleweed | `sudo zypper install --allow-unsigned-rpm ./pkgview-2.6.0-1.x86_64.rpm` |
 | Arch | `sudo pacman -S --needed git base-devel && git clone https://github.com/Stolly345/pkgview && cd pkgview/packaging/aur && makepkg -si` |
 
 All four are tested installing and running in clean containers.
@@ -112,6 +124,10 @@ pkgview extract FILE.pkg -o DIR PATH…  # only these files/folders (paths as sh
         [--overwrite skip|replace|rename] [--no-pkg-folder] [--flat]
 pkgview verify FILE.pkg…               # trailing SHA-1 + known-file headers (wrong-key check)
 pkgview info|list|verify --json FILE…  # one JSON object per package per line (JSON Lines)
+pkgview audit FILE|DIR… [--no-hash] [--json]   # check a collection (see Library)
+pkgview rename FILE|DIR… [-t TEMPLATE] [-n]    # rename by template; -n = dry run
+pkgview rename --undo                  # reverse the last rename run
+pkgview --library DIR                  # GUI: open DIR in the library window
 pkgview -ex FILE.pkg                   # original PkgView's "extract here" switch
 pkgview --extract-here FILE.pkg…       # GUI progress window only, next to each file
 pkgview --extract-to FILE.pkg…         # GUI: the Extract dialog, then progress window only
@@ -120,6 +136,14 @@ pkgview --extract-to FILE.pkg…         # GUI: the Extract dialog, then progres
 with one package). Several packages are processed one after another; a failure is reported and the rest still
 run. **Exit status: 0** = all OK, **1** = at least one package or entry failed (the count is printed),
 **2** = usage error. `--overwrite` defaults to `replace`, the original's behaviour.
+
+`audit` prints one line per package (status, kind, Title ID, version, title, file) with notes under it and a
+summary, and exits 1 if any package is damaged, cut off or unreadable (duplicates and missing games are
+reported, not failures). `--no-hash` skips the SHA-1 check (instant). `rename` fields: `{TITLE}` `{TITLE_ID}`
+`{CONTENT_ID}` `{APP_VER}` `{VERSION}` `{CATEGORY}` `{KIND}` `{REGION}`; a `[…]` group is left out when a field
+in it is empty; `: / \ | * ? " < >` are replaced or dropped; a name already taken gets ` (1)`. Each run is
+logged in `~/.local/state/pkgview/renames/` before the next file is touched, so `--undo` can reverse it (newest
+first; a name taken again meanwhile is reported and skipped).
 
 `--json` prints one compact object per package and line, so a single package is plain JSON and several are JSON
 Lines (`pkgview info --json *.pkg | jq -r 'select(.metadata.content_type_name == "PS1 Classic") | .file'`).
@@ -139,6 +163,10 @@ Desktop integration (GNOME Files):
 - **Right-click menu**: *Extract Here*, *Extract To…* and *Open with PkgView* on `.pkg` files (all selected
   files must be packages). Needs `python3-nautilus` (a Recommends of the `.deb`) and a Files restart
   (`nautilus -q`). Remote files (sftp, smb) are skipped.
+- **Columns** (list view → Visible Columns): *Game Title*, *Title ID*, *Package Kind*, *Package Version*; and a
+  *PS3/PSP Package (PkgView)* section in a package's Properties. Values come from `pkgview info --json`, run in
+  the background and cached per file, so Files never waits on a folder of packages. Checked in Nautilus 46
+  (screenshots); the extension also loads under Nautilus 49's API 4.1.
 - `pkgview --extract-here FILE…` / `--extract-to FILE…` show only a progress window (after a folder chooser
   for `--extract-to`) and an error dialog if a package fails; exit status 1 then. The launcher's "Extract here"
   action and *Open With → Extract PS3 PKG here* use `--extract-here`.

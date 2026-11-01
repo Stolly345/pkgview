@@ -283,8 +283,16 @@ fn info_json(p: &Pkg) -> J {
     opt_s("min_firmware", &m.min_firmware, &mut meta);
     opt_s("title_id", &m.title_id, &mut meta);
     opt_s("install_dir", &m.install_dir, &mut meta);
-    let sfo = p.sfo().into_iter().map(|(k, v)| (k, J::S(v))).collect();
+    let sfo_kv = p.sfo();
+    let category = sfo_kv
+        .iter()
+        .find(|(k, _)| k == "CATEGORY")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    let kind = library::Kind::of(&category, !sfo_kv.is_empty(), m).label();
+    let sfo = sfo_kv.into_iter().map(|(k, v)| (k, J::S(v))).collect();
     J::o([
+        ("kind", J::s(kind)),
         ("content_id", J::s(h.content_id.as_str())),
         ("type", J::s(h.type_label())),
         ("pkg_type", J::N(h.pkg_type as u64)),
