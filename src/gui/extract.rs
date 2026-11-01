@@ -171,18 +171,46 @@ impl Ui {
     /// `start_jobs` from the main window: result in the status bar, failures in a dialog; `show` is opened
     /// in the file manager if everything succeeded.
     pub(super) fn run_jobs(self: &Rc<Self>, jobs: Vec<Job>, show: Option<PathBuf>) {
+        self.run_jobs_again(jobs, show, false)
+    }
+
+    /// `run_jobs`; `retry` = these jobs failed before (the failure message says "again").
+    fn run_jobs_again(self: &Rc<Self>, jobs: Vec<Job>, show: Option<PathBuf>, retry: bool) {
         let ui = self.clone();
         let app = self
             .window
             .application()
             .expect("main window has an application");
+        let again = jobs.clone();
         start_jobs(&app, Some(self.window.upcast_ref()), jobs, move |o| {
             ui.status.set_text(&o.summary);
-            if !o.failed.is_empty() {
-                ui.error(&format!("Extraction failed\n{}", o.failed.join("\n")));
-            } else if let (Some(dir), false) = (&show, o.cancelled) {
-                show_folder(dir);
+            if o.failed.is_empty() {
+                if let (Some(dir), false) = (&show, o.cancelled) {
+                    show_folder(dir);
+                }
+                return;
             }
+            // The failed packages again, with the same destination and options.
+            let failed_jobs: Vec<Job> = o.failed.iter().map(|(k, _)| again[*k].clone()).collect();
+            let (ui, show) = (ui.clone(), show.clone());
+            gtk::AlertDialog::builder()
+                .modal(true)
+                .message(format!(
+                    "{} of {} package(s) failed{}",
+                    o.failed.len(),
+                    again.len(),
+                    if retry { " again" } else { "" }
+                ))
+                .detail(o.messages())
+                .buttons(["Close", "Retry Failed"])
+                .cancel_button(0)
+                .default_button(1)
+                .build()
+                .choose(Some(&ui.window.clone()), gio::Cancellable::NONE, move |r| {
+                    if r == Ok(1) {
+                        ui.run_jobs_again(failed_jobs, show, true);
+                    }
+                });
         });
     }
 }
@@ -205,9 +233,19 @@ fn show_folder(dir: &Path) {
 /// What a finished `start_jobs` reports.
 pub(super) struct Outcome {
     pub summary: String,
-    /// "<pkg>: <reason>" per package that failed to open or extract.
-    pub failed: Vec<String>,
+    /// (job index, "<pkg>: <reason>") per package that failed to open or extract.
+    pub failed: Vec<(usize, String)>,
     pub cancelled: bool,
+}
+
+impl Outcome {
+    pub fn messages(&self) -> String {
+        self.failed
+            .iter()
+            .map(|f| f.1.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 /// What the Extract dialog returns.
@@ -458,7 +496,7 @@ pub(super) fn standalone(
                 let hold = hold.clone();
                 alert(
                     None,
-                    &format!("Extraction failed\n{}", o.failed.join("\n")),
+                    &format!("Extraction failed\n{}", o.messages()),
                     move || {
                         hold.take();
                     },
@@ -573,7 +611,7 @@ pub(super) fn start_jobs(
         Done {
             ok: usize,
             entries: usize,
-            failed: Vec<String>,
+            failed: Vec<(usize, String)>,
             cancelled: bool,
         },
     }
@@ -585,21 +623,21 @@ pub(super) fn start_jobs(
         // Open everything first so the total bar covers every package.
         let mut ready = vec![];
         let mut failed = vec![];
-        for j in jobs {
+        for (k, j) in jobs.into_iter().enumerate() {
             let name = pkg_name(&j.path);
             let pkg = match j.pkg {
                 Some(p) => p,
                 None => match Pkg::open(&j.path) {
                     Ok(p) => Arc::new(p),
                     Err(e) => {
-                        failed.push(format!("{name}: {e}"));
+                        failed.push((k, format!("{name}: {e}")));
                         continue;
                     }
                 },
             };
             let paths: Vec<&str> = j.paths.iter().map(String::as_str).collect();
             let idx = pkg.select(if paths.is_empty() { &[""] } else { &paths });
-            ready.push((name, pkg, idx, j.dest, j.opts));
+            ready.push((name, pkg, idx, j.dest, j.opts, k));
         }
         let bytes = ready
             .iter()
@@ -628,7 +666,7 @@ pub(super) fn start_jobs(
                 Err(_) => Overwrite::Skip, // window gone: cancelled
             }
         };
-        for (i, (name, pkg, idx, dest, opts)) in ready.iter().enumerate() {
+        for (i, (name, pkg, idx, dest, opts, k)) in ready.iter().enumerate() {
             let _ = tx.send(Msg::Pkg(i, name.clone()));
             let progress = |p: Progress| {
                 let _ = tx.send(match p {
@@ -643,7 +681,7 @@ pub(super) fn start_jobs(
                     cancelled = true;
                     break;
                 }
-                Err(e) => failed.push(format!("{name}: {e}")),
+                Err(e) => failed.push((*k, format!("{name}: {e}"))),
             }
         }
         let _ = tx.send(Msg::Done {

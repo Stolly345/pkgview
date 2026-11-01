@@ -99,7 +99,7 @@ const COLUMNS: [Column; 5] = [
     ),
 ];
 
-pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
+pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>, library: Option<PathBuf>) {
     for (action, keys) in [
         ("win.open", &["<Control>o"][..]),
         ("win.extract-to", &["<Control>e"]),
@@ -113,6 +113,7 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
         ("win.up", &["<Alt>Up"]),
         ("win.shortcuts", &["<Control>question"]),
         ("win.inspector", &["F9"]),
+        ("win.library", &["<Control>l"]),
     ] {
         app.set_accels_for_action(action, keys);
     }
@@ -132,6 +133,7 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
     let recent_menu = gio::Menu::new();
     m_file.append_submenu(Some("Open _Recent"), &recent_menu);
     m_file.append(Some("_Bulk extract to…"), Some("win.bulk-extract"));
+    m_file.append(Some("Open _Library Folder…"), Some("win.library"));
     m_file.append(Some("_Reload"), Some("win.reload"));
     m_file.append(Some("E_xit"), Some("win.quit"));
     let m_tools = gio::Menu::new();
@@ -607,10 +609,13 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
         ui.load(&f);
     }
     window.present();
+    if let Some(d) = library {
+        ui.open_library(d);
+    }
 }
 
 impl Ui {
-    fn load(self: &Rc<Self>, path: &Path) {
+    pub(super) fn load(self: &Rc<Self>, path: &Path) {
         let pkg = match Pkg::open(path) {
             Ok(p) => Arc::new(p),
             Err(e) => return self.error(&format!("{}:\n{e}", path.display())),
@@ -1156,6 +1161,8 @@ fn add_actions(ui: &Rc<Ui>) {
     );
     let u = ui.clone();
     add("quit", true, Box::new(move || u.window.close()));
+    let u = ui.clone();
+    add("library", true, Box::new(move || u.choose_library()));
     let u = ui.clone();
     add(
         "extract-here",

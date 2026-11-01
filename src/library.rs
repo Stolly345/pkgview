@@ -370,6 +370,12 @@ pub fn hash_all(records: &[Record], findings: &mut [Findings], progress: impl Fn
     for (k, &n) in todo.iter().enumerate() {
         findings[n].integrity = results[k].lock().unwrap().take();
     }
+    settle(records, findings);
+}
+
+/// After SHA-1 results are in (hashed now, or remembered from before): a damaged copy shares its digest with
+/// an intact one, so it isn't a duplicate.
+pub fn settle(records: &[Record], findings: &mut [Findings]) {
     // The digest is read from the file, so a damaged copy shares it with an intact one: that isn't a
     // duplicate. Point the damaged one at an intact copy instead, and re-link the rest to an intact first.
     let bad = |f: &Findings| f.integrity.as_ref().is_some_and(Integrity::is_bad);
@@ -389,6 +395,53 @@ pub fn hash_all(records: &[Record], findings: &mut [Findings], progress: impl Fn
             findings[n].duplicate_of = first.filter(|&f| f != n);
         }
     }
+}
+
+/// The findings for package `n` as sentences; `name(k)` names package `k`.
+pub fn notes(
+    records: &[Record],
+    found: &[Findings],
+    n: usize,
+    name: impl Fn(usize) -> String,
+) -> Vec<String> {
+    let (r, f) = (&records[n], &found[n]);
+    let mut out = vec![];
+    if let Some(d) = f.duplicate_of {
+        if f.integrity.is_some() && found[d].integrity.is_some() {
+            out.push(format!("identical to {}", name(d)));
+        } else {
+            out.push(format!(
+                "same digest as {} (Verify to tell whether both are intact)",
+                name(d)
+            ));
+        }
+    }
+    if let Some(d) = f.intact_copy {
+        out.push(format!("an intact copy is {}", name(d)));
+    }
+    if let Some(d) = f.same_version_as {
+        out.push(format!(
+            "same content ID and version as {}, but different bytes",
+            name(d)
+        ));
+    }
+    if let (true, Ok(i)) = (f.orphan, &r.info) {
+        out.push(format!(
+            "no game {} here for this {}",
+            i.title_id,
+            i.kind.label().to_lowercase()
+        ));
+    }
+    if f.for_disc {
+        out.push("for a disc game (its base is a disc, not a package)".into());
+    }
+    if let (Some(Licence::Missing), Ok(i)) = (&f.licence, &r.info) {
+        out.push(format!(
+            "needs a licence: no {}.rap next to it or in RPCS3",
+            i.content_id
+        ));
+    }
+    out
 }
 
 /// Region from the content ID's first letter (`UP0001-…` = USA).

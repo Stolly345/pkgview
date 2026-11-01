@@ -143,6 +143,7 @@ impl Ui {
             ("Ctrl+O", "Open a package"),
             ("Ctrl+E", "Extract the selection to…"),
             ("Ctrl+Shift+E", "Bulk extract packages"),
+            ("Ctrl+L", "Open a folder of packages as a library"),
             ("Ctrl+I", "Package properties"),
             ("Ctrl+F", "Search this package"),
             ("Esc", "Leave search / close a dialog"),

@@ -27,6 +27,9 @@ pub struct Cli {
     /// Ask for a folder, then extract FILEs into it, showing only a progress window
     #[arg(long, requires = "files")]
     pub extract_to: bool,
+    /// Open DIR (a folder of packages) in the library window
+    #[arg(long, value_name = "DIR", conflicts_with_all = ["extract_here", "extract_to"])]
+    pub library: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -448,34 +451,8 @@ fn audit(paths: &[PathBuf], no_hash: bool, json: bool) -> anyhow::Result<()> {
             ),
             Err(e) => println!("{:<11} {}: {e}", integrity.label(), name(n)),
         }
-        let note = |t: String| println!("            ↳ {t}");
-        if let Some(d) = f.duplicate_of {
-            note(format!("identical to {}", name(d)));
-        }
-        if let Some(d) = f.intact_copy {
-            note(format!("an intact copy is {}", name(d)));
-        }
-        if let Some(d) = f.same_version_as {
-            note(format!(
-                "same content ID and version as {}, but different bytes",
-                name(d)
-            ));
-        }
-        if let (true, Ok(i)) = (f.orphan, &r.info) {
-            note(format!(
-                "no game {} here for this {}",
-                i.title_id,
-                i.kind.label().to_lowercase()
-            ));
-        }
-        if f.for_disc {
-            note("for a disc game (its base is a disc, not a package)".into());
-        }
-        if let (Some(Licence::Missing), Ok(i)) = (&f.licence, &r.info) {
-            note(format!(
-                "needs a licence: no {}.rap next to it or in RPCS3",
-                i.content_id
-            ));
+        for t in library::notes(&records, &found, n, name) {
+            println!("            ↳ {t}");
         }
     }
     if !json {

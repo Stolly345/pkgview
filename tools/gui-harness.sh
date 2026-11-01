@@ -19,7 +19,18 @@ PKGVIEW_WRITE_SAMPLE=$W/demo.pkg PKGVIEW_SAMPLE_DEMO=1 cargo test -q write_sampl
 n=0
 shot() { n=$((n + 1)); sleep "${2:-1}"; import -window root "$OUT/$(printf %02d $n)-$1.png"; echo "shot $n: $1"; }
 key() { xdotool key --clearmodifiers "$@"; sleep 0.6; }
-win() { xdotool search --sync --onlyvisible --name "$1" | tail -1; }
+# The newest visible window whose title contains $1. Lists titles itself: xdotool's own --name search misses
+# titles with "—" in them. Polls for up to 20 s.
+win() {
+    for _ in $(seq 40); do
+        for w in $(xdotool search --onlyvisible --name '.*' 2>/dev/null | sort -rn); do
+            case "$(xdotool getwindowname "$w" 2>/dev/null)" in *"$1"*) echo "$w"; return 0 ;; esac
+        done
+        sleep 0.5
+    done
+    echo "gui-harness: no window titled *$1*" >&2
+    return 1
+}
 focus() { xdotool windowactivate --sync "$(win "$1")" 2>/dev/null || xdotool windowfocus --sync "$(win "$1")"; sleep 0.3; }
 
 "$B" "$W/demo.pkg" 2>>"$OUT/stderr.log" &
@@ -120,6 +131,43 @@ shot extract-here-replaced 2
 sleep 2
 kill -0 $P 2>/dev/null && echo "extract-here #2: STILL RUNNING" || echo "extract-here #2: exited"
 grep -c " OK$" "$W/demo/demo.log" | sed 's/^/extract-here #2 files written: /' 
+# Library window (2.6.0): a made-up collection; Verify, Rename + Undo, filter, Extract failure + Retry Failed.
+C=$W/coll
+PKGVIEW_WRITE_COLLECTION=$C cargo test -q write_collection -- --ignored >/dev/null 2>&1
+"$B" --library "$C" 2>>"$OUT/stderr.log" &
+LIBP=$!
+win "Library" >/dev/null
+focus "Library"
+shot library 2
+key alt+v; sleep 2; shot library-verified
+key alt+n
+win "Rename" >/dev/null
+shot rename-dialog
+focus "Rename"
+key alt+r; sleep 1.5
+shot renamed-alert
+untitled() { for A in $(xdotool search --onlyvisible --name '^$' | sort -rn); do eval "$(xdotool getwindowgeometry --shell "$A")"; [ "$WIDTH" -gt 200 ] && echo "$A" && return; done; }
+xdotool windowfocus --sync "$(untitled)"; key Return; sleep 1.5
+ls "$C" >"$OUT/library-after-rename.txt"
+shot library-renamed
+focus "Library"
+key alt+u; sleep 1.5
+xdotool windowfocus --sync "$(untitled)"; key Return; sleep 1.5
+ls "$C" >"$OUT/library-after-undo.txt"
+focus "Library"
+key ctrl+f 2>/dev/null; xdotool type --delay 20 "classic"; sleep 1
+shot library-filter
+# Extract the filtered rows to an impossible place: both fail, the alert offers Retry Failed.
+key alt+x
+win "Extract" >/dev/null
+focus "Extract"
+key ctrl+a; xdotool type --delay 20 "/proc/pkgview-cannot-write-here"; key Return
+sleep 2
+shot extract-failed-retry
+xdotool windowfocus --sync "$(untitled)"; key Return # default button = Retry Failed
+sleep 2
+shot retry-failed-again
+kill $LIBP 2>/dev/null || true
 cp "$W/.config/pkgview/settings.ini" "$OUT/settings.ini" 2>/dev/null || true
 echo "done: $OUT"
 exit 0

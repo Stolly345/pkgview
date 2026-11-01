@@ -4,6 +4,7 @@
 mod dialogs;
 mod extract;
 mod inspect;
+mod library;
 mod settings;
 mod window;
 
@@ -87,6 +88,7 @@ enum Pick {
 
 /// One package to extract into `dest/<pkg name>/`: `pkg` already open (current window) or opened by the
 /// worker; empty `paths` = all.
+#[derive(Clone)]
 struct Job {
     path: PathBuf,
     pkg: Option<Arc<Pkg>>,
@@ -175,13 +177,13 @@ struct Ui {
     settings: Settings,
 }
 
-pub fn run(file: Option<PathBuf>) -> ExitCode {
+pub fn run(file: Option<PathBuf>, library: Option<PathBuf>) -> ExitCode {
     extract::clean_stale_open_dirs();
     let app = gtk::Application::builder()
         .application_id(APP_ID)
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
-    app.connect_activate(move |app| window::build_ui(app, file.clone()));
+    app.connect_activate(move |app| window::build_ui(app, file.clone(), library.clone()));
     let code = app.run_with_args::<&str>(&[]);
     // Files opened from the package stay until the next start (clean_stale_open_dirs): a viewer may still
     // be reading them when PkgView quits.
