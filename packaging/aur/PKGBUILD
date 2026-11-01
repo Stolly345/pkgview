@@ -3,7 +3,7 @@
 # New release: `make deb arch` sets pkgver + sha256sums from target/debian/ and rewrites .SRCINFO;
 # upload exactly that .deb to the GitHub release, or the checksum won't match.
 pkgname=pkgview-bin
-pkgver=2.6.0
+pkgver=2.7.0
 pkgrel=1
 pkgdesc="Browse, verify and extract PS3/PSP .pkg installation packages (GTK 4 port of Ifcaro's PkgView)"
 arch=('x86_64')
@@ -17,7 +17,7 @@ conflicts=('pkgview')
 # prebuilt, already stripped release binary
 options=('!debug' '!strip')
 source=("https://github.com/Stolly345/pkgview/releases/download/v${pkgver}/pkgview_${pkgver}-1_amd64.deb")
-sha256sums=('a8656108d724e81cc155a3d15594f1f1e070a80465f95882cd5fb1a7738d7588')
+sha256sums=('801a7939e71c7f5133e466cb37a949b675490d86acf860d4643c0653bb2f972f')
 
 package() {
     bsdtar -xf data.tar.* -C "$pkgdir"

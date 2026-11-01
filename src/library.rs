@@ -250,28 +250,174 @@ pub struct Findings {
     /// A patch or add-on for a disc game (Title ID B…): its base is a disc, not a package
     pub for_disc: bool,
     pub licence: Option<Licence>,
+    /// SHA-1 of the whole file (set by `hash_all`), as DAT files list it
+    pub whole_sha1: Option<[u8; 20]>,
+    pub dat: Option<DatMatch>,
 }
 
-/// Where RPCS3 keeps `.rap` licences (native and Flatpak installs).
-pub fn rpcs3_rap_dirs() -> Vec<PathBuf> {
+/// RPCS3's `dev_hdd0` folders on this machine: native install first, then Flatpak. Each comes from that
+/// install's `vfs.yml` (`/dev_hdd0/: $(EmulatorDir)dev_hdd0/`), else the default `<config>/dev_hdd0`. Only
+/// installs whose config folder exists are listed.
+pub fn rpcs3_hdd0_dirs() -> Vec<PathBuf> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".config"));
-    let exdata = "rpcs3/dev_hdd0/home/00000001/exdata";
-    vec![
-        config.join(exdata),
-        home.join(".var/app/net.rpcs3.RPCS3/config").join(exdata),
-    ]
+    rpcs3_hdd0_in(&[
+        config.join("rpcs3"),
+        home.join(".var/app/net.rpcs3.RPCS3/config/rpcs3"),
+    ])
+}
+
+fn rpcs3_hdd0_in(configs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out = vec![];
+    for c in configs.iter().filter(|c| c.is_dir()) {
+        let vfs = ["config/vfs.yml", "vfs.yml"]
+            .iter()
+            .find_map(|f| std::fs::read_to_string(c.join(f)).ok())
+            .and_then(|t| {
+                t.lines().find_map(|l| {
+                    let v = l
+                        .trim()
+                        .strip_prefix("/dev_hdd0/:")?
+                        .trim()
+                        .trim_matches(['"', '\'']);
+                    (!v.is_empty()).then(|| v.to_string())
+                })
+            });
+        out.push(match vfs {
+            Some(v) => PathBuf::from(v.replace("$(EmulatorDir)", &format!("{}/", c.display()))),
+            None => c.join("dev_hdd0"),
+        });
+    }
+    out
+}
+
+/// Where RPCS3 keeps `.rap` licences.
+pub fn rpcs3_rap_dirs() -> Vec<PathBuf> {
+    rpcs3_hdd0_dirs()
+        .into_iter()
+        .map(|h| h.join("home/00000001/exdata"))
+        .collect()
+}
+
+/// A No-Intro / Redump DAT (Logiqx XML): files by whole-file SHA-1 and by name.
+#[derive(Debug, Default)]
+pub struct Dat {
+    pub name: String,
+    by_sha1: HashMap<[u8; 20], String>,
+    by_name: HashMap<String, String>,
+}
+
+fn unescape(s: &str) -> String {
+    s.replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// `key="value"` inside one tag.
+fn attr(tag: &str, key: &str) -> Option<String> {
+    let start = tag.find(&format!(" {key}=\""))? + key.len() + 3;
+    let end = start + tag[start..].find('"')?;
+    Some(unescape(&tag[start..end]))
+}
+
+fn hex20(s: &str) -> Option<[u8; 20]> {
+    let s = s.trim();
+    if s.len() != 40 {
+        return None;
+    }
+    let mut out = [0u8; 20];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(s.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+impl Dat {
+    /// Every `<rom … sha1="…">` in every `<game>` (or `<machine>`). Errors if there are none.
+    pub fn parse(text: &str) -> Result<Dat, String> {
+        let mut d = Dat::default();
+        if let Some(h) = text.find("<header>") {
+            let h = &text[h..];
+            if let (Some(a), Some(b)) = (h.find("<name>"), h.find("</name>")) {
+                d.name = unescape(h.get(a + 6..b).unwrap_or_default().trim());
+            }
+        }
+        let mut game = String::new();
+        let mut rest = text;
+        while let Some(i) = rest.find('<') {
+            rest = &rest[i..];
+            let end = rest.find('>').unwrap_or(rest.len());
+            let tag = &rest[..end];
+            if tag.starts_with("<game ") || tag.starts_with("<machine ") {
+                game = attr(tag, "name").unwrap_or_default();
+            } else if tag.starts_with("<rom ") {
+                if let Some(sha) = attr(tag, "sha1").as_deref().and_then(hex20) {
+                    d.by_sha1.insert(sha, game.clone());
+                }
+                if let Some(name) = attr(tag, "name").filter(|n| !n.is_empty()) {
+                    d.by_name.insert(name.to_lowercase(), game.clone());
+                }
+            }
+            rest = &rest[end..];
+        }
+        if d.by_sha1.is_empty() {
+            return Err(
+                "no <rom … sha1=\"…\"> entries: not a Logiqx XML DAT (No-Intro, Redump)".into(),
+            );
+        }
+        Ok(d)
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_sha1.len()
+    }
+}
+
+/// How a package compares with a DAT.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DatMatch {
+    /// The DAT has this exact file; the game's name in the DAT
+    Match(String),
+    /// The DAT lists a file of this name, but with another SHA-1: a different or damaged copy
+    NameOnly(String),
+    NotInDat,
+}
+
+/// Compare every hashed package with `dat` (`hash_all` first).
+pub fn match_dat(records: &[Record], found: &mut [Findings], dat: &Dat) {
+    for (r, f) in records.iter().zip(found.iter_mut()) {
+        let Some(sha) = f.whole_sha1 else { continue };
+        let name = r
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        f.dat = Some(match (dat.by_sha1.get(&sha), dat.by_name.get(&name)) {
+            (Some(g), _) => DatMatch::Match(g.clone()),
+            (None, Some(g)) => DatMatch::NameOnly(g.clone()),
+            (None, None) => DatMatch::NotInDat,
+        });
+    }
 }
 
 /// `<content id>.rap` (any case) next to the package or in one of `dirs`.
+/// The folder a file is in; for a bare name ("x.pkg", whose parent is the empty path) the current folder.
+fn beside(p: &Path) -> Option<&Path> {
+    match p.parent() {
+        Some(d) if d.as_os_str().is_empty() => Some(Path::new(".")),
+        d => d,
+    }
+}
+
 pub fn find_rap(pkg_path: &Path, content_id: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
     let want = format!("{content_id}.rap").to_ascii_lowercase();
-    pkg_path
-        .parent()
+    beside(pkg_path)
         .into_iter()
         .chain(dirs.iter().map(PathBuf::as_path))
         .filter_map(|d| std::fs::read_dir(d).ok())
@@ -345,11 +491,16 @@ pub fn audit(records: &[Record], rap_dirs: &[PathBuf]) -> Vec<Findings> {
 /// SHA-1 check of every package that is readable and complete, several at a time. Fills `integrity`.
 pub fn hash_all(records: &[Record], findings: &mut [Findings], progress: impl Fn(usize) + Sync) {
     let todo: Vec<usize> = (0..records.len())
-        .filter(|&n| findings[n].integrity.is_none() && records[n].info.is_ok())
+        .filter(|&n| {
+            let f = &findings[n];
+            let bad = f.integrity.as_ref().is_some_and(Integrity::is_bad);
+            records[n].info.is_ok() && (f.integrity.is_none() || (f.whole_sha1.is_none() && !bad))
+        })
         .collect();
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
-    let results: Vec<std::sync::Mutex<Option<Integrity>>> =
+    type Hashed = (Integrity, Option<[u8; 20]>);
+    let results: Vec<std::sync::Mutex<Option<Hashed>>> =
         todo.iter().map(|_| std::sync::Mutex::new(None)).collect();
     // ponytail: 4 readers; more only thrash a single disk.
     std::thread::scope(|s| {
@@ -357,10 +508,10 @@ pub fn hash_all(records: &[Record], findings: &mut [Findings], progress: impl Fn
             s.spawn(|| loop {
                 let k = next.fetch_add(1, Ordering::Relaxed);
                 let Some(&n) = todo.get(k) else { break };
-                let r = match Pkg::open(&records[n].path).and_then(|p| p.verify_sha1()) {
-                    Ok(true) => Integrity::Ok,
-                    Ok(false) => Integrity::Corrupt,
-                    Err(e) => Integrity::Unreadable(e.to_string()),
+                let r = match Pkg::open(&records[n].path).and_then(|p| p.hashes()) {
+                    Ok((true, whole)) => (Integrity::Ok, Some(whole)),
+                    Ok((false, whole)) => (Integrity::Corrupt, Some(whole)),
+                    Err(e) => (Integrity::Unreadable(e.to_string()), None),
                 };
                 *results[k].lock().unwrap() = Some(r);
                 progress(done.fetch_add(1, Ordering::Relaxed) + 1);
@@ -368,7 +519,10 @@ pub fn hash_all(records: &[Record], findings: &mut [Findings], progress: impl Fn
         }
     });
     for (k, &n) in todo.iter().enumerate() {
-        findings[n].integrity = results[k].lock().unwrap().take();
+        if let Some((integrity, whole)) = results[k].lock().unwrap().take() {
+            findings[n].integrity = Some(integrity);
+            findings[n].whole_sha1 = whole;
+        }
     }
     settle(records, findings);
 }
@@ -441,7 +595,65 @@ pub fn notes(
             i.content_id
         ));
     }
+    match &f.dat {
+        Some(DatMatch::Match(g)) => out.push(format!("matches the DAT: {g}")),
+        Some(DatMatch::NameOnly(g)) => out.push(format!(
+            "the DAT lists this file name ({g}) with another SHA-1"
+        )),
+        Some(DatMatch::NotInDat) => out.push("not in the DAT".into()),
+        None => {}
+    }
     out
+}
+
+/// RPCS3's `dev_hdd0`: `explicit` if given, else the first existing one found (`rpcs3_hdd0_dirs`).
+pub fn resolve_hdd0(explicit: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(p) = explicit {
+        return Ok(p.to_path_buf());
+    }
+    rpcs3_hdd0_dirs().into_iter().find(|p| p.is_dir()).ok_or_else(|| {
+        "RPCS3 not found (no dev_hdd0 under ~/.config/rpcs3 or its Flatpak config): choose its dev_hdd0 folder"
+            .to_string()
+    })
+}
+
+/// What `install_to_rpcs3` did.
+pub struct Installation {
+    pub installed: pkg::Installed,
+    /// A `.rap` found next to the package and copied into RPCS3's licence folder
+    pub rap_copied: Option<PathBuf>,
+}
+
+/// Install one package into RPCS3 (`Pkg::install_rpcs3`). If it needs a licence and `<content ID>.rap` sits
+/// next to it, that is copied into `home/<user>/exdata/` too (unless one is there already), as RPCS3 does
+/// when it installs a `.rap`.
+pub fn install_to_rpcs3(
+    path: &Path,
+    hdd0: &Path,
+    user: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+    progress: impl FnMut(pkg::Progress),
+) -> io::Result<Installation> {
+    let p = Pkg::open(path)?;
+    let installed = p.install_rpcs3(hdd0, user, cancel, progress)?;
+    let mut rap_copied = None;
+    if p.meta.needs_licence() == Some(true) {
+        let cid = &p.header.content_id;
+        let exdata = hdd0.join("home").join(user).join("exdata");
+        if let (Some(rap), None) = (
+            find_rap(path, cid, &[]),
+            find_rap(&exdata.join(".rap"), cid, &[]),
+        ) {
+            std::fs::create_dir_all(&exdata)?;
+            let to = exdata.join(format!("{cid}.rap"));
+            std::fs::copy(&rap, &to)?;
+            rap_copied = Some(to);
+        }
+    }
+    Ok(Installation {
+        installed,
+        rap_copied,
+    })
 }
 
 /// Region from the content ID's first letter (`UP0001-…` = USA).
@@ -872,10 +1084,76 @@ mod tests {
         assert!(f[5].for_disc && !f[5].orphan);
         assert_eq!(f[6].integrity, Some(Integrity::Truncated));
         assert!(matches!(f[7].licence, Some(Licence::Found(_))));
+        assert_eq!(beside(Path::new("lic.pkg")), Some(Path::new(".")));
+        assert_eq!(beside(Path::new("/a/lic.pkg")), Some(Path::new("/a")));
         assert_eq!(f[8].licence, Some(Licence::Missing));
         assert_eq!(f[0].licence, Some(Licence::Unknown));
         assert!(matches!(f[9].integrity, Some(Integrity::Unreadable(_))));
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn rpcs3_dirs_and_dat() {
+        let d = std::env::temp_dir().join(format!("pkgview-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (native, flat, none) = (d.join("rpcs3"), d.join("flat"), d.join("absent"));
+        std::fs::create_dir_all(native.join("config")).unwrap();
+        std::fs::create_dir_all(&flat).unwrap();
+        std::fs::write(
+            native.join("config/vfs.yml"),
+            "$(EmulatorDir): \"\"\n/dev_hdd0/: $(EmulatorDir)dev_hdd0/\n/dev_hdd1/: x\n",
+        )
+        .unwrap();
+        let got = rpcs3_hdd0_in(&[native.clone(), flat.clone(), none]);
+        assert_eq!(
+            got,
+            [
+                PathBuf::from(format!("{}/dev_hdd0/", native.display())),
+                flat.join("dev_hdd0")
+            ]
+        );
+        std::fs::write(flat.join("vfs.yml"), "/dev_hdd0/: '/games/hdd0/'\n").unwrap();
+        assert_eq!(rpcs3_hdd0_in(&[flat])[0], PathBuf::from("/games/hdd0/"));
+        std::fs::remove_dir_all(&d).unwrap();
+
+        let xml = format!(
+            r#"<?xml version="1.0"?><datafile><header><name>Sony - PlayStation 3 (PSN) &amp; more</name></header>
+            <game name="Demo Game (USA)"><rom name="UP0001-NPUB12345_00.pkg" size="10" sha1="{}"/></game>
+            <machine name="Other (Europe)"><rom name="other.pkg" size="5" sha1="{}"/><rom name="nosha.txt"/></machine>
+            </datafile>"#,
+            "aa".repeat(20),
+            "BB".repeat(20)
+        );
+        let dat = Dat::parse(&xml).unwrap();
+        assert_eq!(
+            (dat.name.as_str(), dat.len()),
+            ("Sony - PlayStation 3 (PSN) & more", 2)
+        );
+        assert!(Dat::parse("<datafile></datafile>").is_err());
+        assert!(Dat::parse("<rom name=\"x\" sha1=\"short\"/>").is_err());
+        let recs = vec![
+            rec("/x/whatever.pkg", info("A", "NPUB12345", "HG", "")),
+            rec("/x/other.pkg", info("B", "NPEB00001", "HG", "")),
+            rec("/x/third.pkg", info("C", "NPEB00002", "HG", "")),
+            rec("/x/unhashed.pkg", info("D", "NPEB00003", "HG", "")),
+        ];
+        let mut found = vec![Findings::default(); 4];
+        found[0].whole_sha1 = Some([0xAA; 20]);
+        found[1].whole_sha1 = Some([0x11; 20]);
+        found[2].whole_sha1 = Some([0x22; 20]);
+        match_dat(&recs, &mut found, &dat);
+        assert_eq!(
+            found[0].dat,
+            Some(DatMatch::Match("Demo Game (USA)".into()))
+        );
+        assert_eq!(
+            found[1].dat,
+            Some(DatMatch::NameOnly("Other (Europe)".into()))
+        );
+        assert_eq!(found[2].dat, Some(DatMatch::NotInDat));
+        assert_eq!(found[3].dat, None);
+        let notes = notes(&recs, &found, 0, |_| String::new());
+        assert_eq!(notes, ["matches the DAT: Demo Game (USA)"]);
     }
 
     #[test]

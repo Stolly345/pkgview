@@ -1,10 +1,10 @@
 # PkgView — Product Requirements Document
 
-2026-10-25 · updated 2026-10-31 after an outside review · 2.4.0 shipped and published 2026-11-01 · 2.5.0 and 2.6.0 built 2026-11-01 · Alex Stoll
+2026-10-25 · updated 2026-10-31 after an outside review · 2.4.0 shipped and published 2026-11-01 · 2.5.0–2.7.0 built 2026-11-01 (roadmap complete) · Alex Stoll
 
 ## Overview
 
-PkgView is a native Linux desktop app and CLI that browses, verifies and extracts Sony PS3/PSP `.pkg` installation packages. Versions 2.5.0 and 2.6.0 are built (not yet published); 2.4.0 is the first published release: public at [github.com/Stolly345/pkgview](https://github.com/Stolly345/pkgview) since 2026-11-01, as a `.deb`, an `.rpm` and an Arch PKGBUILD. (2.3.1 was prepared for release but only ever installed locally.) It is a Rust/GTK 4 rewrite of PkgView 1.3 (VB.NET/WinForms, 2010–2012, by Ifcaro), shipped as a `.deb`. Through 2.3.x it supports Debian 12+ and Ubuntu 24.04+; from 2.4.0 it supports Debian 13+ and Ubuntu 24.04+ (see Decisions).
+PkgView is a native Linux desktop app and CLI that browses, verifies and extracts Sony PS3/PSP `.pkg` installation packages. Versions 2.5.0 to 2.7.0 are built, which completes this roadmap (not yet published); 2.4.0 is the first published release: public at [github.com/Stolly345/pkgview](https://github.com/Stolly345/pkgview) since 2026-11-01, as a `.deb`, an `.rpm` and an Arch PKGBUILD. (2.3.1 was prepared for release but only ever installed locally.) It is a Rust/GTK 4 rewrite of PkgView 1.3 (VB.NET/WinForms, 2010–2012, by Ifcaro), shipped as a `.deb`. Through 2.3.x it supports Debian 12+ and Ubuntu 24.04+; from 2.4.0 it supports Debian 13+ and Ubuntu 24.04+ (see Decisions).
 
 This PRD fixes what the product must do through 2.7.0: the features already shipped, the ones planned, and the bar each release must clear. Implementation detail lives in `README.md` and the code's tests.
 
@@ -34,7 +34,7 @@ On Linux the original Windows tool only runs under Mono: it's slow, works one fi
 
 The primary user is someone on a GNOME desktop (Ubuntu 24.04+ or Debian 13+) with a collection of PS3/PSP packages, for example PS1 Classics of 60–365 MB. They're comfortable in a terminal but use the GUI day to day.
 
-| # | Use case | Status at 2.6.0 → target |
+| # | Use case | Status at 2.7.0 → target |
 | --- | --- | --- |
 | 1 | Double-click a `.pkg` in Files and see what is inside | Supported |
 | 2 | Find one file (e.g. `ICON0.PNG`, `PARAM.SFO`) and open or drag it out | Supported |
@@ -47,7 +47,7 @@ The primary user is someone on a GNOME desktop (Ubuntu 24.04+ or Debian 13+) wit
 | 9 | Turn `UP9000-NPUJ00944_00-….pkg` into a readable name | Supported (2.6.0) |
 | 10 | Audit a folder: corrupt files, duplicates, patches or DLC with no base game, missing `.rap` | Supported (2.6.0) |
 | 11 | See title and Title ID as columns in Files without opening PkgView | Supported (2.6.0) |
-| 12 | Put a PS3 package straight into RPCS3's `dev_hdd0` | 2.7.0 |
+| 12 | Put a PS3 package straight into RPCS3's `dev_hdd0` | Supported (2.7.0); not yet compared with RPCS3 itself |
 
 ## Functional requirements
 
@@ -85,9 +85,9 @@ Thirteen requirement groups shipped in 2.0–2.3; the rest land one release at a
 | F27 | Collection | `.rap` status: for packages whose DRM type needs a `.rap`, show *RAP found* / *RAP missing*, looking next to the pkg and in RPCS3's `dev_hdd0/home/00000001/exdata/`. Presence only, nothing is decrypted | Should | 2.6.0 | Shipped |
 | F28 | Files | Nautilus extension adds list-view columns (Title, Title ID, Category, Version) and a Properties tab with the SFO summary, reading `pkgview info --json`; keeps the API 4.0 / 4.1 fallback | Should | 2.6.0 | Shipped |
 | F29 | Bulk | The bulk-extract summary lists successes and failures with reasons and a **Retry failed** button. This replaces the planned queue window | Should | 2.6.0 | Shipped |
-| F30 | Hand-off | Install to RPCS3: extract a PS3 pkg into `<rpcs3>/dev_hdd0/game/<TITLE_ID>/` (path detected from RPCS3's config, overridable), GUI action + `pkgview install-rpcs3 FILE…`. Must be checked against RPCS3's own installer on a real package before release | Should | 2.7.0 | Planned |
-| F31 | CLI | `pkgview diff A.pkg B.pkg`: added / removed / changed entries by path, size, flags, optionally content hash | Could | 2.7.0 | Optional |
-| F32 | Collection | Check packages against an offline No-Intro / Redump DAT file (`--dat FILE`) in `audit` and the library view | Could | 2.7.0 | Optional |
+| F30 | Hand-off | Install to RPCS3: extract a PS3 pkg into `<rpcs3>/dev_hdd0/game/<TITLE_ID>/` (path detected from RPCS3's config, overridable), GUI action + `pkgview install-rpcs3 FILE…`. Must be checked against RPCS3's own installer on a real package before release | Should | 2.7.0 | Shipped (see Checks: RPCS3 comparison not yet run) |
+| F31 | CLI | `pkgview diff A.pkg B.pkg`: added / removed / changed entries by path, size, flags, optionally content hash | Could | 2.7.0 | Shipped |
+| F32 | Collection | Check packages against an offline No-Intro / Redump DAT file (`--dat FILE`) in `audit` and the library view | Could | 2.7.0 | Shipped |
 
 ## Format and correctness
 
@@ -100,10 +100,16 @@ Output must match the original tool byte for byte on every retail package and ev
 
 | Check | How | Result at 2.5.0 |
 | --- | --- | --- |
-| Unit tests | 29 tests (2.6.0 adds: kinds, templates and safe names, audit findings incl. disc patches and licences, rename plan/apply/undo incl. never overwriting). 2.5.0's 25 (2.5.0 adds: metadata records incl. truncated/garbled blocks, metadata read from a pkg, parallel = serial debug keystream, `read_head`/`sfo`/`write_entry`, JSON writer escaping, text/hex detection). 2.4.0's 19: crypto round-trip for all 3 types, wrong key, malicious input (incl. far-away names), fuzz, options, Ask hook, symlinks, free space, header check, >4 GiB sparse entry (independent counter), search, history, CLI args | Pass |
-| GUI | `make gui`: Xvfb + xdotool, 25 screenshots (2.6.0 adds the library: verify, rename + undo on real files, filter, extract failure + Retry Failed); 2.5.0's 18 (2.5.0 adds the inspector: package overview on open, PARAM.SFO table, image, hex, text, F9 hide); 2.4.0's 12 (tree right-click, Extract dialog, Ask round trip + cancel, search jump, Verify, `--extract-to` cancel/extract, `--extract-here` + Replace All) | Pass, inspected |
+| Unit tests | 32 tests (2.7.0 adds: RPCS3 install rules incl. overwrite flag, content-type folders, DLC install folder, unsafe names, cancel cleanup, symlinks; diff + whole-file SHA-1; RPCS3 dev_hdd0 from vfs.yml; DAT parsing and matching). 2.6.0's 29 (2.6.0 adds: kinds, templates and safe names, audit findings incl. disc patches and licences, rename plan/apply/undo incl. never overwriting). 2.5.0's 25 (2.5.0 adds: metadata records incl. truncated/garbled blocks, metadata read from a pkg, parallel = serial debug keystream, `read_head`/`sfo`/`write_entry`, JSON writer escaping, text/hex detection). 2.4.0's 19: crypto round-trip for all 3 types, wrong key, malicious input (incl. far-away names), fuzz, options, Ask hook, symlinks, free space, header check, >4 GiB sparse entry (independent counter), search, history, CLI args | Pass |
+| GUI | `make gui`: Xvfb + xdotool, 27 screenshots (2.7.0 adds Install to RPCS3 from the library and a library opened with `--dat`); 2.6.0's 25 (2.6.0 adds the library: verify, rename + undo on real files, filter, extract failure + Retry Failed); 2.5.0's 18 (2.5.0 adds the inspector: package overview on open, PARAM.SFO table, image, hex, text, F9 hide); 2.4.0's 12 (tree right-click, Extract dialog, Ask round trip + cancel, search jump, Verify, `--extract-to` cancel/extract, `--extract-here` + Replace All) | Pass, inspected |
 | Original code | `make compare`: the original VB crypto compiled under Mono vs the port, synthetic pkgs of each type | Retail identical; debug differs only in the `0x90` entry |
 | Real packages | `make realtest` + `make compare SAMPLES=…` on 3 debug PS3 pkgs | SHA-1 OK, TITLE\_ID matches, identical to the original's output |
+
+**Checks added in 2.7.0:**
+- **Install to RPCS3 mirrors RPCS3's source** (`set_install_path`, `extract_worker` in `rpcs3/Crypto/unpkg.cpp`): folder by content type, install folder from header offset 55 or metadata `0xA`, folders for entry types 0x04/0x12, only the file types RPCS3 writes, existing files kept unless flagged `0x80000000`, a failed new install removed. Unit-tested rule by rule; CLI and GUI installs checked into a fake RPCS3 config (`vfs.yml` with `$(EmulatorDir)`), including the `.rap` copy.
+- **NOT DONE: comparison with RPCS3 itself.** `make compare-rpcs3` installs the test packages with `rpcs3 --installpkg` and with PkgView and diffs the trees; running the downloaded RPCS3 needs the owner's go-ahead, so it has not run. Until it has, treat F30 as following RPCS3's code, not proven against it.
+- **DAT check** on a DAT built from real hashes of the test collection plus a wrong one: match, not in DAT and same name / other SHA-1 all reported (CLI and GUI). Real No-Intro / Redump DATs not tried (none on hand).
+- **Found while testing:** a `.rap` beside a package given by bare file name (`x.pkg`) was never found: the parent of a bare name is the empty path, not `.`.
 
 **Checks added in 2.6.0** (all done):
 - **Collection end to end:** `write_collection` makes a game, an identical copy, its patch, a patch without its game, a patch for a disc game, a PS1 Classic, a corrupted copy, a cut-off download, a non-package and a `.rap`; `audit`, `rename` (+ dry run, undo, bad template) and the library window all report and act on it correctly.
@@ -150,7 +156,7 @@ Output must match the original tool byte for byte on every retail package and ev
 | 2.4.0 | D | **Safety + extract:** symlink-safe writes, exit codes, >4 GiB + `0x90` checks, GTK 4.14 floor, extract dialog, key test, keep opened files until next start (F14–F19) | Shipped; published 2026-11-01 (GitHub release v2.4.0: .deb + .rpm; Arch PKGBUILD in the repo) |
 | 2.5.0 | E | **Inspect:** inspector pane + full metadata, `--json`, `cat`, parallel debug keystream (F20–F23) | Shipped (built 2026-11-01, not yet published) |
 | 2.6.0 | F | **Collection:** rename, audit, library view, `.rap` status, Files columns + Properties tab, Retry failed (F24–F29) | Shipped (built 2026-11-01, not yet published) |
-| 2.7.0 | G | **Hand-off:** install to RPCS3; optional diff and DAT check (F30–F32) | Next |
+| 2.7.0 | G | **Hand-off:** install to RPCS3; diff and DAT check (F30–F32) | Shipped (built 2026-11-01, not yet published); RPCS3 comparison pending |
 
 Each phase ships as its own installable `.deb` and must pass the acceptance list below before the next starts.
 
@@ -219,7 +225,8 @@ The biggest risk is still narrow sample coverage: every real package so far is a
 | Metadata block, DRM type and SFO category codes come from RPCS3's source (psdevwiki unreachable) | Wrong labels in the inspector, `info` and (2.6.0) rename/audit | DRM names marked *unverified* in the UI; README lists metadata decoding as UNVERIFIED on a real pkg; check with the first real sample that has metadata |
 | Rename touches the user's real files | A bad template or bug renames a collection wrongly | Preview before anything changes, each rename logged before the next, undo, never overwrites (renameat2 NOREPLACE); tested on synthetic collections only |
 | Kind detection relies on PARAM.SFO CATEGORY and metadata flags; DLC without PARAM.SFO needs metadata | An add-on may show as "Other", a patch as "Game" | Classifier unit-tested; check against real patches/DLC when samples exist |
-| Install to RPCS3 may not match what RPCS3's own installer does (DLC placement, PS1 Classics) | Games that don't boot in RPCS3 | Compare a PkgView install with an RPCS3 install of the same package file by file before shipping F30 |
+| Install to RPCS3 may not match what RPCS3's own installer does (DLC placement, PS1 Classics) | Games that don't boot in RPCS3 | Rules taken from RPCS3's source and unit-tested; `make compare-rpcs3` (RPCS3 vs PkgView on the test packages) written but not run; run it, and once with a real package, before publishing 2.7.0 |
+| RPCS3 changes its installer (new content types, folders) | Installs drift from RPCS3's | Re-read `unpkg.cpp` and re-run `make compare-rpcs3` when updating |
 | Raising the floor to GTK 4.14 drops Debian 12 | Debian 12 users have no package (2.3.1 was never published as a download) | Accepted 2026-10-31; they can build commit `4bfd30c` (2.3.1) from source. Publish a 2.3.1 `.deb` only if someone asks |
 | The AUR doesn't have `pkgview-bin`: registration closed and no account (2026-11-01) | Arch users must clone the repo and run `makepkg -si` | README and release notes say so; upload `packaging/aur` (PKGBUILD + `.SRCINFO`) when registration reopens |
 | Drag-out extracts at drag start (GTK 4 has no XDS) | UI pauses on large drags | 512 MB cap with “Use Extract” message |

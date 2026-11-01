@@ -16,13 +16,20 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// A file's identity: device, inode, size, modification time.
+type FileKey = (u64, u64, u64, i64);
+/// A SHA-1 check's result and the whole file's SHA-1.
+type Hashed = (Integrity, Option<[u8; 20]>);
+
 struct Lib {
     dir: PathBuf,
     records: RefCell<Vec<Record>>,
     found: RefCell<Vec<Findings>>,
     icons: RefCell<Vec<Option<gdk::Texture>>>,
     /// SHA-1 results by file identity (device, inode, size, mtime): a rename keeps them, a changed file not.
-    checked: RefCell<std::collections::HashMap<(u64, u64, u64, i64), Integrity>>,
+    checked: RefCell<std::collections::HashMap<FileKey, Hashed>>,
+    /// A loaded No-Intro / Redump DAT: packages are matched against it after Verify
+    dat: RefCell<Option<library::Dat>>,
     /// Row indices (into `records`) as BoxedAnyObject(usize)
     store: gio::ListStore,
     sel: gtk::MultiSelection,
@@ -153,6 +160,18 @@ impl Lib {
         if unchecked > 0 {
             s.push_str(&format!(" · SHA-1 not checked for {unchecked} (Verify)"));
         }
+        if let Some(d) = self.dat.borrow().as_ref() {
+            let hits = found
+                .iter()
+                .filter(|f| matches!(f.dat, Some(library::DatMatch::Match(_))))
+                .count();
+            let name = if d.name.is_empty() {
+                "the DAT"
+            } else {
+                d.name.as_str()
+            };
+            s.push_str(&format!(" · {hits} match {name}"));
+        }
         self.status.set_text(&s);
     }
 
@@ -210,14 +229,22 @@ impl Lib {
         for (r, f) in records.iter().zip(found.iter_mut()) {
             let Some(k) = key(&r.path) else { continue };
             match &f.integrity {
-                None => f.integrity = checked.get(&k).cloned(),
+                None => {
+                    if let Some((i, sha)) = checked.get(&k).cloned() {
+                        f.integrity = Some(i);
+                        f.whole_sha1 = sha;
+                    }
+                }
                 Some(i @ (Integrity::Ok | Integrity::Corrupt)) => {
-                    checked.insert(k, i.clone());
+                    checked.insert(k, (i.clone(), f.whole_sha1));
                 }
                 Some(_) => {}
             }
         }
         library::settle(records, found);
+        if let Some(d) = self.dat.borrow().as_ref() {
+            library::match_dat(records, found, d);
+        }
     }
 
     /// SHA-1 of every package not yet checked, 4 at a time, with a running count.
@@ -227,7 +254,10 @@ impl Lib {
         }
         let records = self.records.borrow().clone();
         let mut found = self.found.borrow().clone();
-        let total = found.iter().filter(|f| f.integrity.is_none()).count();
+        let total = found
+            .iter()
+            .filter(|f| f.integrity.is_none() || f.whole_sha1.is_none())
+            .count();
         let done = Arc::new(AtomicUsize::new(0));
         let d = done.clone();
         let status = self.status.clone();
@@ -295,11 +325,77 @@ impl Lib {
                         paths: vec![],
                         dest: c.dest.clone(),
                         opts: c.opts,
+                        rpcs3: None,
                     })
                     .collect();
                 ui.run_jobs(jobs, c.open_after.then(|| c.dest.clone()));
             },
         );
+    }
+
+    /// Install the targets (readable ones) into RPCS3.
+    fn install(self: &Rc<Self>) {
+        let paths: Vec<PathBuf> = {
+            let records = self.records.borrow();
+            self.targets()
+                .into_iter()
+                .filter(|&n| records[n].info.is_ok())
+                .map(|n| records[n].path.clone())
+                .collect()
+        };
+        if !paths.is_empty() {
+            self.ui.install_into_rpcs3(paths, self.win.upcast_ref());
+        }
+    }
+
+    /// DAT…: load a No-Intro / Redump DAT, then Verify (which matches every package against it).
+    fn load_dat(self: &Rc<Self>) {
+        let f = gtk::FileFilter::new();
+        f.set_name(Some("DAT files (*.dat, *.xml)"));
+        f.add_suffix("dat");
+        f.add_suffix("xml");
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&f);
+        let d = gtk::FileDialog::builder()
+            .title("Load a No-Intro or Redump DAT")
+            .modal(true)
+            .filters(&filters)
+            .default_filter(&f)
+            .build();
+        let l = self.clone();
+        d.open(Some(&self.win), gio::Cancellable::NONE, move |r| {
+            if let Some(p) = r.ok().and_then(|f| f.path()) {
+                l.use_dat(&p);
+            }
+        });
+    }
+
+    /// `--dat`: load the DAT once the first scan is done.
+    fn wait_then_dat(self: &Rc<Self>, p: PathBuf) {
+        if self.busy.get() {
+            let l = self.clone();
+            glib::timeout_add_local_once(Duration::from_millis(200), move || l.wait_then_dat(p));
+        } else {
+            self.use_dat(&p);
+        }
+    }
+
+    /// Read a DAT file and Verify against it; an unreadable file is reported.
+    fn use_dat(self: &Rc<Self>, p: &Path) {
+        let parsed = std::fs::read_to_string(p)
+            .map_err(|e| e.to_string())
+            .and_then(|t| library::Dat::parse(&t));
+        match parsed {
+            Ok(dat) => {
+                *self.dat.borrow_mut() = Some(dat);
+                self.verify();
+            }
+            Err(e) => alert(
+                Some(self.win.upcast_ref()),
+                &format!("Not a DAT this can read\n{}: {e}", p.display()),
+                || {},
+            ),
+        }
     }
 
     fn undo_rename(self: &Rc<Self>) {
@@ -516,6 +612,51 @@ fn icon_column(l: &Rc<Lib>) -> gtk::ColumnViewColumn {
 }
 
 impl Ui {
+    /// Install packages into RPCS3 with the progress window. RPCS3's dev_hdd0 comes from the remembered
+    /// choice, else RPCS3's own config; if neither works, the user picks it once (remembered).
+    pub(super) fn install_into_rpcs3(self: &Rc<Self>, paths: Vec<PathBuf>, parent: &gtk::Window) {
+        let run = {
+            let ui = self.clone();
+            move |hdd0: PathBuf| {
+                let jobs = paths
+                    .iter()
+                    .map(|p| Job {
+                        path: p.clone(),
+                        pkg: None,
+                        paths: vec![],
+                        dest: hdd0.clone(),
+                        opts: Default::default(),
+                        rpcs3: Some((hdd0.clone(), "00000001".into())),
+                    })
+                    .collect();
+                ui.run_jobs(jobs, None);
+            }
+        };
+        let remembered = self
+            .settings
+            .get("rpcs3_hdd0")
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir());
+        let found = remembered.map_or_else(|| library::resolve_hdd0(None), Ok);
+        match found {
+            Ok(hdd0) => run(hdd0),
+            Err(why) => {
+                let d = gtk::FileDialog::builder()
+                    .title(why)
+                    .modal(true)
+                    .initial_folder(&gio::File::for_path(glib::home_dir()))
+                    .build();
+                let ui = self.clone();
+                d.select_folder(Some(parent), gio::Cancellable::NONE, move |r| {
+                    if let Some(p) = r.ok().and_then(|f| f.path()) {
+                        let _ = ui.settings.set("rpcs3_hdd0", &p.to_string_lossy());
+                        run(p);
+                    }
+                });
+            }
+        }
+    }
+
     /// File → Open Library Folder…: choose a folder, then show it as a library.
     pub(super) fn choose_library(self: &Rc<Self>) {
         let start = self
@@ -532,12 +673,12 @@ impl Ui {
         let ui = self.clone();
         d.select_folder(Some(&self.window), gio::Cancellable::NONE, move |r| {
             if let Some(p) = r.ok().and_then(|f| f.path()) {
-                ui.open_library(p);
+                ui.open_library(p, None);
             }
         });
     }
 
-    pub(super) fn open_library(self: &Rc<Self>, dir: PathBuf) {
+    pub(super) fn open_library(self: &Rc<Self>, dir: PathBuf, dat: Option<PathBuf>) {
         let _ = self.settings.set("library", &dir.to_string_lossy());
         let app = self
             .window
@@ -573,6 +714,7 @@ impl Ui {
             found: RefCell::default(),
             icons: RefCell::default(),
             checked: RefCell::default(),
+            dat: RefCell::default(),
             store,
             sel,
             status: status.clone(),
@@ -639,6 +781,16 @@ impl Ui {
                 "Extract the selected packages (all shown, if none is selected)",
                 "extract",
             ),
+            (
+                "_Install to RPCS3",
+                "Install the selected packages (all shown, if none is selected) into RPCS3, as RPCS3 itself would",
+                "install",
+            ),
+            (
+                "_DAT…",
+                "Load a No-Intro or Redump DAT and check every package against it (runs Verify)",
+                "dat",
+            ),
             ("Re_scan", "Read the folder again", "rescan"),
         ] {
             let b = gtk::Button::with_mnemonic(label);
@@ -651,6 +803,8 @@ impl Ui {
                     "rename" => l.rename(),
                     "undo" => l.undo_rename(),
                     "extract" => l.extract(),
+                    "install" => l.install(),
+                    "dat" => l.load_dat(),
                     _ => l.scan(),
                 }
             });
@@ -684,5 +838,10 @@ impl Ui {
         });
         win.present();
         l.scan();
+        if let Some(p) = dat {
+            // After the scan has filled the table (both run on the UI thread's queue, scan first).
+            let l = l.clone();
+            glib::timeout_add_local_once(Duration::from_millis(300), move || l.wait_then_dat(p));
+        }
     }
 }

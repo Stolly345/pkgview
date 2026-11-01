@@ -167,6 +167,32 @@ shot extract-failed-retry
 xdotool windowfocus --sync "$(untitled)"; key Return # default button = Retry Failed
 sleep 2
 shot retry-failed-again
+xdotool windowfocus --sync "$(untitled)"; key Escape # Close
+
+# Install to RPCS3 (2.7.0): a fake RPCS3 config in $HOME; the filtered rows (the two PS1 Classics).
+mkdir -p "$HOME/.config/rpcs3/dev_hdd0"
+focus "Library"
+key alt+i; sleep 3
+shot rpcs3-installed
+(cd "$HOME/.config/rpcs3/dev_hdd0" && find . -type f | sort) >"$OUT/rpcs3-tree.txt"
+kill $LIBP 2>/dev/null || true
+
+# DAT check: a DAT made from two of the collection's packages, plus one wrong hash.
+python3 - "$C" "$W/test.dat" <<'PY'
+import hashlib, os, sys
+c, out = sys.argv[1], sys.argv[2]
+rows = []
+for f, game in [("classic.pkg", "Demo Classic (Japan)"), ("patch.pkg", "Demo Game - Deluxe Update (USA)")]:
+    p = os.path.join(c, f)
+    rows.append(f'<game name="{game}"><rom name="{f}" size="{os.path.getsize(p)}" sha1="{hashlib.sha1(open(p, "rb").read()).hexdigest()}"/></game>')
+rows.append('<game name="Lost Game (USA)"><rom name="lonely patch.pkg" size="1" sha1="' + "0" * 40 + '"/></game>')
+open(out, "w").write('<?xml version="1.0"?><datafile><header><name>Test DAT</name></header>' + "".join(rows) + "</datafile>")
+PY
+"$B" --library "$C" --dat "$W/test.dat" 2>>"$OUT/stderr.log" &
+LIBP=$!
+win "Library" >/dev/null
+sleep 5
+shot library-dat
 kill $LIBP 2>/dev/null || true
 cp "$W/.config/pkgview/settings.ini" "$OUT/settings.ini" 2>/dev/null || true
 echo "done: $OUT"

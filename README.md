@@ -48,6 +48,15 @@ goes to him; see [Credits](#credits).
   `{TITLE} [{TITLE_ID}] [v{APP_VER}] [{CATEGORY}]`, shown before anything changes; safe on FAT/exFAT/NTFS drives,
   never overwrites, and every run can be undone (Undo Rename / `pkgview rename --undo`).
 - Bulk extract failures list each package with its reason and offer **Retry Failed**.
+- **Install to RPCS3** (Tools menu, the library, or `pkgview install-rpcs3`): puts a package into the emulator's
+  `dev_hdd0` the way RPCS3's own installer does (see below), with progress and cancel; a `.rap` licence next to
+  the package is copied too. RPCS3 is found from its own config (native or Flatpak); if it can't be, PkgView
+  asks for the `dev_hdd0` folder once.
+- **DAT check** (Library → DAT…, `pkgview audit --dat FILE`, or `pkgview --library DIR --dat FILE`): looks every
+  package up in a No-Intro or Redump DAT (Logiqx XML) by the SHA-1 of the whole file: *matches the DAT: <name>*,
+  *not in the DAT*, or *the DAT lists this file name with another SHA-1*.
+- **Compare two packages** (`pkgview diff A.pkg B.pkg`): entries added, removed or changed (size, flags, and
+  with `--content` the bytes), e.g. what an update patch replaces.
 - GNOME Files: package icons as thumbnails; right-click *Extract Here* / *Extract To…* / *Open with PkgView*;
   **Game Title, Title ID, Package Kind and Package Version columns** and a **PkgView section in Properties**
 - Headless CLI (`info`, `list`, `cat`, `extract`, `verify`, `audit`, `rename`, each with several packages;
@@ -63,9 +72,9 @@ Download the package for your distro from the
 
 | Distro | Install |
 |---|---|
-| Ubuntu 24.04+, Debian 13 | `sudo apt install ./pkgview_2.6.0-1_amd64.deb` (use `apt`, not `dpkg -i`, so dependencies come too) |
-| Fedora 40+ | `sudo dnf install ./pkgview-2.6.0-1.x86_64.rpm` |
-| openSUSE Tumbleweed | `sudo zypper install --allow-unsigned-rpm ./pkgview-2.6.0-1.x86_64.rpm` |
+| Ubuntu 24.04+, Debian 13 | `sudo apt install ./pkgview_2.7.0-1_amd64.deb` (use `apt`, not `dpkg -i`, so dependencies come too) |
+| Fedora 40+ | `sudo dnf install ./pkgview-2.7.0-1.x86_64.rpm` |
+| openSUSE Tumbleweed | `sudo zypper install --allow-unsigned-rpm ./pkgview-2.7.0-1.x86_64.rpm` |
 | Arch | `sudo pacman -S --needed git base-devel && git clone https://github.com/Stolly345/pkgview && cd pkgview/packaging/aur && makepkg -si` |
 
 All four are tested installing and running in clean containers.
@@ -127,7 +136,10 @@ pkgview info|list|verify --json FILE…  # one JSON object per package per line 
 pkgview audit FILE|DIR… [--no-hash] [--json]   # check a collection (see Library)
 pkgview rename FILE|DIR… [-t TEMPLATE] [-n]    # rename by template; -n = dry run
 pkgview rename --undo                  # reverse the last rename run
-pkgview --library DIR                  # GUI: open DIR in the library window
+pkgview --library DIR [--dat FILE]     # GUI: open DIR in the library window (and check it against a DAT)
+pkgview install-rpcs3 FILE… [--hdd0 DIR] [--user ID]   # install into RPCS3 like RPCS3 does
+pkgview diff A.pkg B.pkg [--content] [--json]           # exit 0 = same, 1 = different
+pkgview audit … --dat FILE             # also match against a No-Intro / Redump DAT
 pkgview -ex FILE.pkg                   # original PkgView's "extract here" switch
 pkgview --extract-here FILE.pkg…       # GUI progress window only, next to each file
 pkgview --extract-to FILE.pkg…         # GUI: the Extract dialog, then progress window only
@@ -171,6 +183,17 @@ Desktop integration (GNOME Files):
   for `--extract-to`) and an error dialog if a package fails; exit status 1 then. The launcher's "Extract here"
   action and *Open With → Extract PS3 PKG here* use `--extract-here`.
 - `man pkgview`; bash, zsh and fish completions are installed with the package.
+
+**How `install-rpcs3` installs** (from RPCS3's `rpcs3/Crypto/unpkg.cpp`): into `dev_hdd0/game/<install folder>/`,
+where the install folder is the metadata's (DLC) or the 9 characters of the Title ID at header offset 55; themes
+go to `theme/`, licences to `home/<user>/exdata/`, widgets, VSH modules, avatars and virtual memory cards to
+their own folders. Entries of type `0x04`/`0x12` are folders; only the file types RPCS3 writes are written; a file
+that already exists is replaced only if the package marks its entry overwritable (flag `0x80000000`), otherwise
+kept (that's how RPCS3 keeps a game's files when a patch doesn't replace them); a new install folder is removed
+again if the install fails or is cancelled. `dev_hdd0` comes from RPCS3's `vfs.yml` (`$(EmulatorDir)` = its
+config folder), native install first, then Flatpak. **Not yet compared with RPCS3 itself:**
+`make compare-rpcs3` installs the test packages with RPCS3's own installer and with PkgView and compares the
+trees; it downloads and runs RPCS3, and hasn't been run yet.
 
 ## PKG format (as implemented by the original)
 

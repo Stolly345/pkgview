@@ -95,6 +95,8 @@ struct Job {
     paths: Vec<String>,
     dest: PathBuf,
     opts: ExtractOptions,
+    /// Install into RPCS3 instead of extracting: (dev_hdd0, user)
+    rpcs3: Option<(PathBuf, String)>,
 }
 
 /// Back/forward list of visited folders.
@@ -177,7 +179,8 @@ struct Ui {
     settings: Settings,
 }
 
-pub fn run(file: Option<PathBuf>, library: Option<PathBuf>) -> ExitCode {
+/// `library`: a folder to open in the library window, and optionally a DAT to check it against.
+pub fn run(file: Option<PathBuf>, library: Option<(PathBuf, Option<PathBuf>)>) -> ExitCode {
     extract::clean_stale_open_dirs();
     let app = gtk::Application::builder()
         .application_id(APP_ID)

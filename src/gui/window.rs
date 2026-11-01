@@ -99,7 +99,11 @@ const COLUMNS: [Column; 5] = [
     ),
 ];
 
-pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>, library: Option<PathBuf>) {
+pub(super) fn build_ui(
+    app: &gtk::Application,
+    file: Option<PathBuf>,
+    library: Option<(PathBuf, Option<PathBuf>)>,
+) {
     for (action, keys) in [
         ("win.open", &["<Control>o"][..]),
         ("win.extract-to", &["<Control>e"]),
@@ -138,6 +142,7 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>, library: O
     m_file.append(Some("E_xit"), Some("win.quit"));
     let m_tools = gio::Menu::new();
     m_tools.append(Some("_Search…"), Some("win.search"));
+    m_tools.append(Some("_Install to RPCS3"), Some("win.install-rpcs3"));
     m_tools.append(
         Some("_Associate .pkg files with this application"),
         Some("win.associate"),
@@ -609,8 +614,8 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>, library: O
         ui.load(&f);
     }
     window.present();
-    if let Some(d) = library {
-        ui.open_library(d);
+    if let Some((dir, dat)) = library {
+        ui.open_library(dir, dat);
     }
 }
 
@@ -656,6 +661,7 @@ impl Ui {
             "properties",
             "search",
             "reload",
+            "install-rpcs3",
         ] {
             self.action(a).set_enabled(true);
         }
@@ -1025,6 +1031,7 @@ impl Ui {
                         paths: vec![],
                         dest: c.dest.clone(),
                         opts: c.opts,
+                        rpcs3: None,
                     })
                     .collect();
                 ui.run_jobs(jobs, c.open_after.then(|| c.dest.clone()));
@@ -1163,6 +1170,17 @@ fn add_actions(ui: &Rc<Ui>) {
     add("quit", true, Box::new(move || u.window.close()));
     let u = ui.clone();
     add("library", true, Box::new(move || u.choose_library()));
+    let u = ui.clone();
+    add(
+        "install-rpcs3",
+        false,
+        Box::new(move || {
+            let path = u.pkg.borrow().as_ref().map(|(_, p)| p.clone());
+            if let Some(p) = path {
+                u.install_into_rpcs3(vec![p], u.window.upcast_ref());
+            }
+        }),
+    );
     let u = ui.clone();
     add(
         "extract-here",

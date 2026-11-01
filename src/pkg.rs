@@ -1168,6 +1168,11 @@ impl Pkg {
 
     /// Compare the trailing digest with SHA-1 of everything before the last 32 bytes (checked on real pkgs).
     pub fn verify_sha1(&self) -> io::Result<bool> {
+        Ok(self.hashes()?.0)
+    }
+
+    /// One read of the whole file: (trailing digest matches, SHA-1 of the entire file as DAT files list it).
+    pub fn hashes(&self) -> io::Result<(bool, [u8; 20])> {
         let end = self.len - FOOTER_LEN;
         let mut h = Sha1::new();
         let mut buf = vec![0u8; CHUNK];
@@ -1178,8 +1183,211 @@ impl Pkg {
             h.update(&buf[..n]);
             pos += n as u64;
         }
-        Ok(h.finalize()[..] == self.header.sha1)
+        let mut whole = h.clone();
+        let mut tail = [0u8; FOOTER_LEN as usize];
+        self.file.read_exact_at(&mut tail, end)?;
+        whole.update(tail);
+        Ok((
+            h.finalize()[..] == self.header.sha1,
+            whole.finalize().into(),
+        ))
     }
+
+    /// RPCS3's install folder name: the metadata's install folder (DLC), else the 9 characters at header
+    /// offset 55 (the content ID's Title ID part). None if unsafe as a single folder name.
+    pub fn install_dir(&self) -> Option<String> {
+        let d = match &self.meta.install_dir {
+            Some(d) => d.clone(),
+            None => self.header.content_id.get(7..16)?.to_string(),
+        };
+        let d = d.trim_end_matches('\0').to_string();
+        (!d.is_empty() && d != "." && d != ".." && !d.contains(['/', '\\', '\0'])).then_some(d)
+    }
+
+    /// Where RPCS3 puts this package below `dev_hdd0`, by content type (rpcs3/Crypto/unpkg.cpp,
+    /// `set_install_path`). `user` is the RPCS3 user ("00000001").
+    pub fn rpcs3_subdir(&self, user: &str) -> io::Result<PathBuf> {
+        let dir = || {
+            self.install_dir()
+                .ok_or_else(|| bad("no valid install folder name in the package"))
+        };
+        Ok(match self.meta.content_type {
+            Some(0x09) => PathBuf::from("theme"),
+            Some(0x0A) => Path::new("widget").join(dir()?),
+            Some(0x0B) => Path::new("home").join(user).join("exdata"),
+            Some(0x0C) => Path::new("vsh/modules").join(dir()?),
+            Some(0x0D) => Path::new("home").join(user).join("psn_avatar").join(dir()?),
+            Some(0x11) => Path::new("tmp/vmc").join(dir()?),
+            _ => Path::new("game").join(dir()?),
+        })
+    }
+
+    /// Install into RPCS3's `dev_hdd0` the way RPCS3's own installer does: folder by content type, folders
+    /// for entry types 0x04/0x12, files only for the entry types RPCS3 writes, an existing file replaced
+    /// only if its entry has the overwrite flag (0x80000000), a new install folder removed again if the
+    /// install fails or is cancelled. Nothing is written through a symlink below `hdd0`.
+    pub fn install_rpcs3(
+        &self,
+        hdd0: &Path,
+        user: &str,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(Progress),
+    ) -> io::Result<Installed> {
+        const FILE_TYPES: [u32; 15] = [
+            0x01, 0x02, 0x03, 0x05, 0x06, 0x09, 0x0E, 0x10, 0x11, 0x13, 0x14, 0x15, 0x16, 0x18,
+            0x19,
+        ];
+        if !hdd0.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "{} doesn't exist: is that RPCS3's dev_hdd0 folder?",
+                    hdd0.display()
+                ),
+            ));
+        }
+        let sub = self.rpcs3_subdir(user)?;
+        let dest = hdd0.join(&sub);
+        let fresh = !present(&dest);
+        let mut done = Installed {
+            folder: dest.clone(),
+            ..Default::default()
+        };
+        let res = (|| {
+            mkdirs_nofollow(hdd0, &sub)?;
+            for e in &self.entries {
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(false);
+                }
+                progress(Progress::File(e));
+                let target = dest.join(&e.path);
+                let kind = e.flags & 0xFF;
+                if kind == 0x04 || kind == 0x12 {
+                    mkdirs_nofollow(hdd0, &sub.join(&e.path))?;
+                    continue;
+                }
+                if !FILE_TYPES.contains(&kind) {
+                    done.skipped_types += 1;
+                    progress(Progress::Bytes(e.size));
+                    continue;
+                }
+                if fs::symlink_metadata(&target).is_ok_and(|m| m.is_file())
+                    && e.flags & 0x8000_0000 == 0
+                {
+                    done.kept += 1;
+                    progress(Progress::Bytes(e.size));
+                    continue;
+                }
+                if let Some(p) = Path::new(&e.path).parent() {
+                    mkdirs_nofollow(hdd0, &sub.join(p))?;
+                }
+                if !self.extract_file(e, &target, cancel, &mut progress)? {
+                    return Ok(false);
+                }
+                done.written += 1;
+            }
+            Ok(true)
+        })();
+        if fresh && !matches!(res, Ok(true)) {
+            let _ = fs::remove_dir_all(&dest);
+        }
+        match res {
+            Ok(true) => Ok(done),
+            Ok(false) => Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// What `install_rpcs3` did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Installed {
+    pub folder: PathBuf,
+    pub written: usize,
+    /// Existing files left alone (their entries lack the overwrite flag)
+    pub kept: usize,
+    /// Entries of a type RPCS3 doesn't write
+    pub skipped_types: usize,
+}
+
+/// One difference between two packages (`diff`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    Added(String),
+    Removed(String),
+    /// path, what differs
+    Changed(String, String),
+}
+
+/// Entries of `b` compared with `a` by path: added, removed, changed size / flags / folder-ness, and with
+/// `content` also the decrypted bytes of same-size files. Sorted by path.
+pub fn diff(a: &Pkg, b: &Pkg, content: bool) -> io::Result<Vec<Change>> {
+    use std::collections::BTreeMap;
+    let index = |p: &Pkg| -> BTreeMap<String, usize> {
+        p.entries
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.path.clone(), i))
+            .collect()
+    };
+    let (ia, ib) = (index(a), index(b));
+    let mut out = vec![];
+    for (path, &i) in &ia {
+        let Some(&j) = ib.get(path) else {
+            out.push(Change::Removed(path.clone()));
+            continue;
+        };
+        let (x, y) = (&a.entries[i], &b.entries[j]);
+        let mut what = vec![];
+        if x.is_dir() != y.is_dir() {
+            what.push(if y.is_dir() {
+                "now a folder".into()
+            } else {
+                "now a file".into()
+            });
+        } else if !x.is_dir() && x.size != y.size {
+            what.push(format!(
+                "size {} → {}",
+                thousands(x.size),
+                thousands(y.size)
+            ));
+        } else if content && !x.is_dir() && entry_sha1(a, x)? != entry_sha1(b, y)? {
+            what.push("content".into());
+        }
+        if x.flags != y.flags {
+            what.push(format!("flags {:08X} → {:08X}", x.flags, y.flags));
+        }
+        if !what.is_empty() {
+            out.push(Change::Changed(path.clone(), what.join(", ")));
+        }
+    }
+    for path in ib.keys().filter(|p| !ia.contains_key(*p)) {
+        out.push(Change::Added(path.clone()));
+    }
+    out.sort_by(|x, y| {
+        let key = |c: &Change| match c {
+            Change::Added(p) | Change::Removed(p) | Change::Changed(p, _) => p.clone(),
+        };
+        key(x).cmp(&key(y))
+    });
+    Ok(out)
+}
+
+/// SHA-1 of one entry's decrypted bytes.
+fn entry_sha1(p: &Pkg, e: &Entry) -> io::Result<[u8; 20]> {
+    struct H(Sha1);
+    impl Write for H {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.update(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut h = H(Sha1::new());
+    p.write_entry(e, &mut h, &AtomicBool::new(false), &mut |_| {})?;
+    Ok(h.0.finalize().into())
 }
 
 /// PARAM.SFO, all little-endian: magic `\0PSF`, version, key_table_start, data_table_start, count;
@@ -1909,6 +2117,130 @@ mod tests {
             .unwrap();
         assert!(done && &out == want && n == want.len() as u64);
         fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn rpcs3_install_follows_rpcs3() {
+        let items: Vec<Item> = vec![
+            ("USRDIR", None, 0),
+            ("USRDIR/EBOOT.BIN", Some(noise(3000, 1)), 0x8000_0000), // overwrite flag
+            ("PARAM.SFO", Some(sfo(&[("TITLE", "x")])), 0),
+            ("odd.unk", Some(noise(10, 2)), 0x08), // type 0x0B: RPCS3 doesn't write it
+            ("deep/a/b.bin", Some(noise(40, 3)), 0),
+        ];
+        let d = tmp("rpcs3");
+        let hdd0 = d.join("dev_hdd0");
+        let missing = Pkg::open(&write_pkg(&build(TYPE_RETAIL_PS3, &items)).1).unwrap();
+        let err = missing.install_rpcs3(&hdd0, "00000001", &AtomicBool::new(false), |_| {});
+        assert!(err.unwrap_err().to_string().contains("dev_hdd0"));
+        fs::create_dir_all(&hdd0).unwrap();
+        let pkg_at = |bytes: &[u8], name: &str| {
+            let p = d.join(name);
+            fs::write(&p, bytes).unwrap();
+            Pkg::open(&p).unwrap()
+        };
+        let go = |p: &Pkg| p.install_rpcs3(&hdd0, "00000001", &AtomicBool::new(false), |_| {});
+        let p = pkg_at(&build(TYPE_RETAIL_PS3, &items), "a.pkg");
+        assert_eq!(p.install_dir().as_deref(), Some("NPUB12345"));
+        let r = go(&p).unwrap();
+        let game = hdd0.join("game/NPUB12345");
+        assert_eq!(r.folder, game);
+        assert_eq!((r.written, r.kept, r.skipped_types), (3, 0, 1));
+        assert_eq!(
+            fs::read(game.join("USRDIR/EBOOT.BIN")).unwrap(),
+            noise(3000, 1)
+        );
+        assert!(game.join("deep/a/b.bin").is_file() && !game.join("odd.unk").exists());
+        // Again over changed files: only the entry with the overwrite flag replaces its file.
+        fs::write(game.join("USRDIR/EBOOT.BIN"), b"old").unwrap();
+        fs::write(game.join("PARAM.SFO"), b"mine").unwrap();
+        let r = go(&p).unwrap();
+        assert_eq!((r.written, r.kept), (1, 2)); // EBOOT.BIN replaced; PARAM.SFO and deep/a/b.bin kept
+        assert_eq!(
+            fs::read(game.join("USRDIR/EBOOT.BIN")).unwrap(),
+            noise(3000, 1)
+        );
+        assert_eq!(fs::read(game.join("PARAM.SFO")).unwrap(), b"mine");
+        // Folder by content type, and the metadata's install folder (DLC).
+        let with = |records: &[(u32, &[u8])], name: &str| {
+            let mut b = build(TYPE_RETAIL_PS3, &items[..3]);
+            add_meta(&mut b, records);
+            pkg_at(&b, name)
+        };
+        let theme = with(&[(0x2, &9u32.to_be_bytes())], "t.pkg");
+        assert_eq!(go(&theme).unwrap().folder, hdd0.join("theme"));
+        let lic = with(&[(0x2, &0xBu32.to_be_bytes())], "l.pkg");
+        assert_eq!(go(&lic).unwrap().folder, hdd0.join("home/00000001/exdata"));
+        let dlc = with(&[(0xA, b"\0\0\0\0\0\0\0\0NPUB12345-DLC1\0\0")], "d.pkg");
+        assert_eq!(go(&dlc).unwrap().folder, hdd0.join("game/NPUB12345-DLC1"));
+        let evil = with(&[(0xA, b"\0\0\0\0\0\0\0\0../../x\0")], "e.pkg");
+        assert!(evil.install_dir().is_none() && go(&evil).is_err());
+        // Cancelled into a new folder: the folder is removed again.
+        let cancel = AtomicBool::new(false);
+        let mut b = build_id(
+            TYPE_RETAIL_PS3,
+            &items,
+            "UP0001-NPUB77777_00-0000000000000001",
+        );
+        b[0x0C..0x10].copy_from_slice(&0u32.to_be_bytes());
+        let p2 = pkg_at(&b, "c.pkg");
+        let e = p2.install_rpcs3(&hdd0, "00000001", &cancel, |pr| {
+            if let Progress::Bytes(_) = pr {
+                cancel.store(true, Ordering::Relaxed)
+            }
+        });
+        assert_eq!(e.unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert!(!hdd0.join("game/NPUB77777").exists());
+        // Never through a symlink below dev_hdd0.
+        let hdd1 = d.join("hdd1");
+        fs::create_dir_all(&hdd1).unwrap();
+        std::os::unix::fs::symlink(d.join("elsewhere"), hdd1.join("game")).unwrap();
+        assert!(p
+            .install_rpcs3(&hdd1, "00000001", &AtomicBool::new(false), |_| {})
+            .is_err());
+        assert!(!d.join("elsewhere").exists());
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn diff_and_whole_file_sha1() {
+        let a_items: Vec<Item> = vec![
+            ("same.bin", Some(noise(50, 1)), 0),
+            ("gone.bin", Some(noise(20, 2)), 0),
+            ("bigger.bin", Some(noise(30, 3)), 0),
+            ("flags.bin", Some(noise(16, 4)), 0),
+            ("content.bin", Some(noise(64, 5)), 0),
+        ];
+        let mut b_items = a_items.clone();
+        b_items.remove(1);
+        b_items[1].1 = Some(noise(31, 3));
+        b_items[2].2 = 0x8000_0000;
+        b_items[3].1 = Some(noise(64, 6));
+        b_items.push(("new/added.bin", Some(noise(8, 7)), 0));
+        let (da, pa) = write_pkg(&build(TYPE_RETAIL_PS3, &a_items));
+        let (db, pb) = write_pkg(&build(TYPE_DEBUG_PS3, &b_items));
+        let (a, b) = (Pkg::open(&pa).unwrap(), Pkg::open(&pb).unwrap());
+        let quick = diff(&a, &b, false).unwrap();
+        assert_eq!(
+            quick,
+            [
+                Change::Changed("bigger.bin".into(), "size 30 → 31".into()),
+                Change::Changed("flags.bin".into(), "flags 00000003 → 80000003".into()),
+                Change::Removed("gone.bin".into()),
+                Change::Added("new/added.bin".into()),
+            ]
+        );
+        let deep = diff(&a, &b, true).unwrap();
+        assert!(
+            deep.contains(&Change::Changed("content.bin".into(), "content".into())),
+            "{deep:?}"
+        );
+        assert!(diff(&a, &a, true).unwrap().is_empty());
+        let (ok, whole) = a.hashes().unwrap();
+        assert!(ok);
+        assert_eq!(whole[..], Sha1::digest(fs::read(&pa).unwrap())[..]);
+        fs::remove_dir_all(da).unwrap();
+        fs::remove_dir_all(db).unwrap();
     }
 
     #[test]

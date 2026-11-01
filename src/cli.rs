@@ -30,6 +30,9 @@ pub struct Cli {
     /// Open DIR (a folder of packages) in the library window
     #[arg(long, value_name = "DIR", conflicts_with_all = ["extract_here", "extract_to"])]
     pub library: Option<PathBuf>,
+    /// With --library: check the folder against this No-Intro / Redump DAT (runs Verify)
+    #[arg(long, value_name = "FILE", requires = "library")]
+    pub dat: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -56,8 +59,11 @@ pub enum Cmd {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
         /// Skip the SHA-1 check (reads only headers: instant)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "dat")]
         no_hash: bool,
+        /// Also look every package up in a No-Intro / Redump DAT (Logiqx XML), by SHA-1 of the whole file
+        #[arg(long, value_name = "FILE")]
+        dat: Option<PathBuf>,
         /// One JSON object per package, one per line
         #[arg(long)]
         json: bool,
@@ -77,6 +83,31 @@ pub enum Cmd {
         /// Reverse the last rename run
         #[arg(long, conflicts_with_all = ["paths", "dry_run"])]
         undo: bool,
+    },
+    /// Install packages into RPCS3's dev_hdd0 the way RPCS3's own installer does (folder by content type,
+    /// existing files kept unless the package marks them overwritable); copies a .rap found next to a package
+    #[command(name = "install-rpcs3")]
+    InstallRpcs3 {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// RPCS3's dev_hdd0 folder (default: found from RPCS3's config, native or Flatpak)
+        #[arg(long, value_name = "DIR")]
+        hdd0: Option<PathBuf>,
+        /// RPCS3 user for licences and avatars
+        #[arg(long, default_value = "00000001")]
+        user: String,
+    },
+    /// Compare two packages: entries added, removed or changed (size, flags; with --content also bytes).
+    /// Exit status 0 = same, 1 = different
+    Diff {
+        a: PathBuf,
+        b: PathBuf,
+        /// Also compare the decrypted bytes of same-size files (reads both packages)
+        #[arg(long)]
+        content: bool,
+        /// One JSON object
+        #[arg(long)]
+        json: bool,
     },
     /// Write one file from the package to stdout (PATH as shown by `list`, without the root)
     Cat { file: PathBuf, path: String },
@@ -388,7 +419,14 @@ fn progress_line(what: &'static str, total: usize) -> impl Fn(usize) + Sync {
     }
 }
 
-fn audit(paths: &[PathBuf], no_hash: bool, json: bool) -> anyhow::Result<()> {
+fn audit(paths: &[PathBuf], no_hash: bool, dat: Option<&Path>, json: bool) -> anyhow::Result<()> {
+    let dat = match dat {
+        Some(p) => {
+            let text = std::fs::read_to_string(p).with_context(|| p.display().to_string())?;
+            Some(library::Dat::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?)
+        }
+        None => None,
+    };
     let files = library::collect(paths);
     if files.is_empty() {
         bail!("no .pkg files in {paths:?}");
@@ -398,6 +436,12 @@ fn audit(paths: &[PathBuf], no_hash: bool, json: bool) -> anyhow::Result<()> {
     if !no_hash {
         let n = found.iter().filter(|f| f.integrity.is_none()).count();
         library::hash_all(&records, &mut found, progress_line("Hashing", n));
+    }
+    if let Some(d) = &dat {
+        library::match_dat(&records, &mut found, d);
+        if !json {
+            eprintln!("DAT: {} ({} files)", d.name, d.len());
+        }
     }
     let name = |n: usize| records[n].path.display().to_string();
     let mut bad = 0;
@@ -441,6 +485,18 @@ fn audit(paths: &[PathBuf], no_hash: bool, json: bool) -> anyhow::Result<()> {
                 ("for_disc_game".into(), J::B(f.for_disc)),
                 ("licence".into(), J::s(licence)),
             ]);
+            if let Some(m) = &f.dat {
+                let (k, g) = match m {
+                    library::DatMatch::Match(g) => ("match", g.as_str()),
+                    library::DatMatch::NameOnly(g) => ("name only", g.as_str()),
+                    library::DatMatch::NotInDat => ("not in DAT", ""),
+                };
+                o.push(("dat".into(), J::s(k)));
+                o.push(("dat_game".into(), J::s(g)));
+            }
+            if let Some(h) = f.whole_sha1 {
+                o.push(("sha1".into(), J::s(pkg::hex(&h))));
+            }
             if let Some(Licence::Found(p)) = &f.licence {
                 o.push(("licence_file".into(), J::s(p.to_string_lossy())));
             }
@@ -596,8 +652,96 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
         Cmd::Audit {
             paths,
             no_hash,
+            dat,
             json,
-        } => audit(&paths, no_hash, json)?,
+        } => audit(&paths, no_hash, dat.as_deref(), json)?,
+        Cmd::InstallRpcs3 { files, hdd0, user } => {
+            let hdd0 = library::resolve_hdd0(hdd0.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
+            eprintln!("RPCS3 dev_hdd0: {}", hdd0.display());
+            each(&files, |f| {
+                let done =
+                    library::install_to_rpcs3(f, &hdd0, &user, &AtomicBool::new(false), |_| {})?;
+                let i = &done.installed;
+                let mut line = format!(
+                    "{}: {} file(s) into {}",
+                    f.display(),
+                    i.written,
+                    i.folder.display()
+                );
+                if i.kept > 0 {
+                    line.push_str(&format!(
+                        "; kept {} existing (not marked overwritable)",
+                        i.kept
+                    ));
+                }
+                if i.skipped_types > 0 {
+                    line.push_str(&format!(
+                        "; skipped {} of a type RPCS3 doesn't install",
+                        i.skipped_types
+                    ));
+                }
+                if let Some(r) = &done.rap_copied {
+                    line.push_str(&format!("; licence copied to {}", r.display()));
+                }
+                println!("{line}");
+                Ok(())
+            })?
+        }
+        Cmd::Diff {
+            a,
+            b,
+            content,
+            json,
+        } => {
+            let (pa, pb) = (open(&a)?, open(&b)?);
+            let changes = pkg::diff(&pa, &pb, content)?;
+            if json {
+                let list = changes
+                    .iter()
+                    .map(|c| match c {
+                        pkg::Change::Added(p) => {
+                            J::o([("change", J::s("added")), ("path", J::s(p.as_str()))])
+                        }
+                        pkg::Change::Removed(p) => {
+                            J::o([("change", J::s("removed")), ("path", J::s(p.as_str()))])
+                        }
+                        pkg::Change::Changed(p, w) => J::o([
+                            ("change", J::s("changed")),
+                            ("path", J::s(p.as_str())),
+                            ("what", J::s(w.as_str())),
+                        ]),
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    J::o([
+                        ("a", J::s(a.to_string_lossy())),
+                        ("b", J::s(b.to_string_lossy())),
+                        ("same", J::B(changes.is_empty())),
+                        ("changes", J::A(list)),
+                    ])
+                );
+            } else {
+                for c in &changes {
+                    match c {
+                        pkg::Change::Added(p) => println!("+ {p}"),
+                        pkg::Change::Removed(p) => println!("- {p}"),
+                        pkg::Change::Changed(p, w) => println!("~ {p} ({w})"),
+                    }
+                }
+                if changes.is_empty() {
+                    let how = if content {
+                        "same entries and bytes"
+                    } else {
+                        "same entries, sizes and flags (--content compares bytes)"
+                    };
+                    println!("No differences: {how}");
+                }
+            }
+            if !changes.is_empty() {
+                std::process::exit(1);
+            }
+        }
         Cmd::Rename {
             paths,
             template,

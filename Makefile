@@ -3,7 +3,7 @@
 # With a local toolchain (rustup + libgtk-4-dev + cargo-deb), run with RUN= to skip Docker.
 RUN ?= ./run-in-docker.sh
 
-.PHONY: image build test lint deb rpm arch packages install sample realtest compare gui clean
+.PHONY: image build test lint deb rpm arch packages install sample realtest compare compare-rpcs3 gui clean
 
 image:
 	docker build -t pkgview-build -f Dockerfile.build .
@@ -50,6 +50,11 @@ realtest:
 	@test -d "$(SAMPLES)" || { echo "usage: make realtest SAMPLES=/folder/with/pkgs"; exit 2; }
 	SAMPLES="$(abspath $(SAMPLES))" $(RUN) env PKGVIEW_SAMPLE=/samples \
 	  cargo test --release real_sample -- --ignored --nocapture
+
+# Install the test packages with RPCS3's own installer and with `pkgview install-rpcs3`, compare the trees
+# (downloads and runs the latest RPCS3 AppImage)
+compare-rpcs3:
+	tools/compare-with-rpcs3.sh
 
 # GUI smoke run under Xvfb: screenshots in target/gui/ (inspect them)
 gui:

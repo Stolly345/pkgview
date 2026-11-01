@@ -2,6 +2,7 @@
 
 use super::settings::Settings;
 use super::{alert, close_on_escape, Job, Ui};
+use crate::library;
 use crate::pkg::{pkg_name, round_bytes, ExtractOptions, Overwrite, Pkg, Progress};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -163,6 +164,7 @@ impl Ui {
                 paths,
                 dest: dir,
                 opts,
+                rpcs3: None,
             }],
             show,
         );
@@ -476,6 +478,7 @@ pub(super) fn standalone(
                     paths: vec![],
                     dest: dest.clone().unwrap_or_else(|| next_to(p)),
                     opts,
+                    rpcs3: None,
                 })
                 .collect();
             let show = match (show, dest.as_ref(), jobs.as_slice()) {
@@ -537,6 +540,7 @@ pub(super) fn start_jobs(
     on_done: impl Fn(Outcome) + 'static,
 ) {
     let n_jobs = jobs.len();
+    let installing = jobs.first().is_some_and(|j| j.rpcs3.is_some());
     let first = jobs.first().map(|j| pkg_name(&j.path)).unwrap_or_default();
 
     // Progress window
@@ -575,10 +579,11 @@ pub(super) fn start_jobs(
     b.append(&time_lbl);
     b.append(&cancel_btn);
     let win = gtk::Window::builder()
-        .title(if n_jobs > 1 {
-            format!("Bulk extract ({n_jobs} packages)")
-        } else {
-            format!("Extracting {first}")
+        .title(match (installing, n_jobs > 1) {
+            (true, true) => format!("Installing {n_jobs} packages into RPCS3"),
+            (true, false) => format!("Installing {first} into RPCS3"),
+            (false, true) => format!("Bulk extract ({n_jobs} packages)"),
+            (false, false) => format!("Extracting {first}"),
         })
         .default_width(460)
         .child(&b)
@@ -637,7 +642,7 @@ pub(super) fn start_jobs(
             };
             let paths: Vec<&str> = j.paths.iter().map(String::as_str).collect();
             let idx = pkg.select(if paths.is_empty() { &[""] } else { &paths });
-            ready.push((name, pkg, idx, j.dest, j.opts, k));
+            ready.push((name, pkg, idx, j.dest, j.opts, k, j.rpcs3, j.path));
         }
         let bytes = ready
             .iter()
@@ -666,7 +671,7 @@ pub(super) fn start_jobs(
                 Err(_) => Overwrite::Skip, // window gone: cancelled
             }
         };
-        for (i, (name, pkg, idx, dest, opts, k)) in ready.iter().enumerate() {
+        for (i, (name, pkg, idx, dest, opts, k, rpcs3, path)) in ready.iter().enumerate() {
             let _ = tx.send(Msg::Pkg(i, name.clone()));
             let progress = |p: Progress| {
                 let _ = tx.send(match p {
@@ -674,7 +679,15 @@ pub(super) fn start_jobs(
                     Progress::Bytes(n) => Msg::Bytes(n),
                 });
             };
-            let r = pkg.extract_asking(name, idx, dest, opts, &c, progress, &mut ask);
+            let r = match rpcs3 {
+                Some((hdd0, user)) => library::install_to_rpcs3(path, hdd0, user, &c, progress)
+                    .map(|_| true)
+                    .or_else(|e| match e.kind() {
+                        std::io::ErrorKind::Interrupted => Ok(false),
+                        _ => Err(e),
+                    }),
+                None => pkg.extract_asking(name, idx, dest, opts, &c, progress, &mut ask),
+            };
             match r {
                 Ok(true) => ok += 1,
                 Ok(false) => {
@@ -757,7 +770,13 @@ pub(super) fn start_jobs(
                         format!("{n} {}", if n == 1 { one } else { many })
                     };
                     let summary = if cancelled {
-                        "Extraction cancelled".to_string()
+                        "Cancelled".to_string()
+                    } else if installing {
+                        format!(
+                            "Installed {ok} of {} into RPCS3 ({})",
+                            plural(n_jobs, "package", "packages"),
+                            out_dir.display()
+                        )
                     } else if n_jobs == 1 && ok == 1 {
                         format!(
                             "Extracted {} to {}",

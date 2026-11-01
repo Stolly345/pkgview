@@ -17,7 +17,10 @@ fn main() -> ExitCode {
         if cli.extract_here || cli.extract_to {
             return gui::run_extract(cli.files, cli.extract_to);
         }
-        return gui::run(cli.files.into_iter().next(), cli.library);
+        return gui::run(
+            cli.files.into_iter().next(),
+            cli.library.map(|l| (l, cli.dat)),
+        );
     };
     // `pkgview list x.pkg | head` should exit quietly, not panic on EPIPE.
     // SAFETY: restoring the default disposition before any threads exist.
