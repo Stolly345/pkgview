@@ -9,7 +9,7 @@
     <p>PkgView lists the contents of PS3 and PSP .pkg files (debug and retail) in a folder tree and
     decrypts and extracts selected files or folders. It also shows the package header, the PARAM.SFO
     title information and ICON0.PNG, and can check the package's SHA-1 digest.</p>
-    <p>Rust/GTK4 port of PkgView 1.3 (2010-2012) by Ifcaro.</p>
+    <p>Rust/GTK4 port of PkgView 1.3 (2010-2012) by Ifcaro (https://github.com/ifcaro/PkgView), whose original tool and format work it is based on.</p>
   </description>
   <launchable type="desktop-id">io.github.stolly345.pkgview.desktop</launchable>
   <developer id="io.github.stolly345"><name>Alex Stoll</name></developer>

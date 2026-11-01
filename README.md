@@ -1,7 +1,9 @@
 # PkgView (Rust/GTK4 port)
 
 Browse and extract Sony **PS3/PSP `.pkg`** installation packages on Linux, with GNOME Files integration.
-This is a Rust/GTK 4 port of [PkgView 1.3](https://github.com/ifcaro/PkgView) (VB.NET/WinForms, 2010–2012, by Ifcaro).
+This is a Rust/GTK 4 port of [PkgView 1.3](https://github.com/ifcaro/PkgView) (VB.NET/WinForms, 2010–2012), written by
+**[Ifcaro](https://github.com/ifcaro)**. All credit for working out the package format and writing the original tool
+goes to him; see [Credits](#credits).
 
 ![PkgView browsing a package](data/screenshots/main.png)
 
@@ -38,26 +40,33 @@ Requirements and roadmap: [PRD.md](PRD.md).
 
 ## Install
 
-One x86-64 build, three package formats, all from [Releases](https://github.com/Stolly345/pkgview/releases):
+Download the package for your distro from the
+[latest release](https://github.com/Stolly345/pkgview/releases/latest):
 
-| Distribution | File | Install |
-| --- | --- | --- |
-| Ubuntu 24.04+, Debian 13+ (and derivatives) | `pkgview_<version>-1_amd64.deb` | `sudo apt install ./pkgview_*_amd64.deb` |
-| Fedora 40+ | `pkgview-<version>-1.x86_64.rpm` | `sudo dnf install ./pkgview-*.x86_64.rpm` |
-| openSUSE Tumbleweed | `pkgview-<version>-1.x86_64.rpm` | `sudo zypper install --allow-unsigned-rpm ./pkgview-*.x86_64.rpm` |
-| Arch and Arch-based | `packaging/aur/PKGBUILD` (`pkgview-bin`) | see below |
+| Distro | Install |
+|---|---|
+| Ubuntu 24.04+, Debian 13 | `sudo apt install ./pkgview_2.4.0-1_amd64.deb` (use `apt`, not `dpkg -i`, so dependencies come too) |
+| Fedora 40+ | `sudo dnf install ./pkgview-2.4.0-1.x86_64.rpm` |
+| openSUSE Tumbleweed | `sudo zypper install --allow-unsigned-rpm ./pkgview-2.4.0-1.x86_64.rpm` |
+| Arch | `sudo pacman -S --needed git base-devel && git clone https://github.com/Stolly345/pkgview && cd pkgview/packaging/aur && makepkg -si` |
+
+All four are tested installing and running in clean containers.
 
 Then restart Files (`nautilus -q`) so it loads the right-click menu. Needs GTK ≥ 4.14 and glibc ≥ 2.39; on
-Debian 12 use 2.3.1, the last release for GTK 4.8. Use `apt`/`dnf`/`zypper` on the file, not `dpkg -i`/`rpm -i`:
-they fetch the dependencies. The Files menu needs the Nautilus Python bindings (`python3-nautilus`,
+Debian 12 use 2.3.1, the last release for GTK 4.8. The Files menu needs the Nautilus Python bindings (`python3-nautilus`,
 `nautilus-python`, `python3XX-nautilus`), installed with the package unless you skip recommended packages.
 
-**Arch:** `pkgview-bin` repackages the release `.deb` (same binary). It is not on the AUR yet (AUR account
-registration is closed); build it from this repository:
-```sh
-git clone https://github.com/Stolly345/pkgview && cd pkgview/packaging/aur
-makepkg -si                       # installs gtk4 & co. first; python-nautilus for the Files menu (optional)
-```
+- **Arch and Arch-based:** the PKGBUILD in `packaging/aur` (`pkgview-bin`) repackages the release `.deb`, so
+  nothing compiles. It isn't on the AUR yet (AUR registration is closed for now):
+
+  ```sh
+  sudo pacman -S --needed git base-devel
+  git clone --depth 1 https://github.com/Stolly345/pkgview && cd pkgview/packaging/aur
+  makepkg -si
+  sudo pacman -S --needed python-nautilus   # optional: the Files right-click menu
+  ```
+
+  Remove with `sudo pacman -R pkgview-bin`.
 
 ## Build
 
@@ -213,6 +222,20 @@ PkgView is not affiliated with or endorsed by Sony Interactive Entertainment. It
 does not decrypt EDAT/RAP-protected files; it reads package containers using the package keys that the original
 PkgView and other open-source tools have published since 2010. Only use it on packages you have the right to use.
 
+## Credits
+
+- **[Ifcaro](https://github.com/ifcaro)** (ifcaro@ifcaro.net) wrote the original **PkgView**, 2010–2012:
+  [github.com/ifcaro/PkgView](https://github.com/ifcaro/PkgView), released under the ISC licence. This project is
+  a port of that tool. Its package parsing, the decryption scheme, the debug/retail and PS3/PSP key handling, the
+  extraction layout and the log format all follow his `pkgmgr.vb` and `Main.vb`, and his code is the reference
+  that every release is compared against byte for byte (`make compare`). The PS3/PSP package keys used are the
+  ones his tool published. His copyright notice is kept in `LICENSE`, in the About dialog and in every package.
+- The format notes are cross-checked against the [PS3 Developer Wiki](https://www.psdevwiki.com/ps3/PKG_files)
+  and [RPCS3](https://github.com/RPCS3/rpcs3) (`rpcs3/Crypto/unpkg.cpp`).
+- Rust/GTK 4 port, Linux desktop integration and packaging: Alex Stoll (2026).
+
+This port is not affiliated with Ifcaro, and he is not responsible for its bugs.
+
 ## License
 
-ISC-style, see `LICENSE`. Original © 2010-2012 Ifcaro.
+ISC, the original's licence; see `LICENSE`. Original © 2010–2012 Ifcaro; Rust port © 2026 Alex Stoll, same terms.

@@ -5,7 +5,7 @@
 pkgname=pkgview-bin
 pkgver=2.4.0
 pkgrel=1
-pkgdesc="Browse, verify and extract PS3/PSP .pkg installation packages (GTK 4 port of PkgView)"
+pkgdesc="Browse, verify and extract PS3/PSP .pkg installation packages (GTK 4 port of Ifcaro's PkgView)"
 arch=('x86_64')
 url="https://github.com/Stolly345/pkgview"
 license=('ISC')
@@ -17,7 +17,7 @@ conflicts=('pkgview')
 # prebuilt, already stripped release binary
 options=('!debug' '!strip')
 source=("https://github.com/Stolly345/pkgview/releases/download/v${pkgver}/pkgview_${pkgver}-1_amd64.deb")
-sha256sums=('d7c78cb32de7ee9a55dd5322b0d902c57422843cfd8661be17863d1d2d31f41a')
+sha256sums=('8e64808297697d44f3c624965742f0a0c16277e1e67bb4a2b28abc13debcd489')
 
 package() {
     bsdtar -xf data.tar.* -C "$pkgdir"

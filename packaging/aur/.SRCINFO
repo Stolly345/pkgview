@@ -1,5 +1,5 @@
 pkgbase = pkgview-bin
-	pkgdesc = Browse, verify and extract PS3/PSP .pkg installation packages (GTK 4 port of PkgView)
+	pkgdesc = Browse, verify and extract PS3/PSP .pkg installation packages (GTK 4 port of Ifcaro's PkgView)
 	pkgver = 2.4.0
 	pkgrel = 1
 	url = https://github.com/Stolly345/pkgview
@@ -19,6 +19,6 @@ pkgbase = pkgview-bin
 	options = !debug
 	options = !strip
 	source = https://github.com/Stolly345/pkgview/releases/download/v2.4.0/pkgview_2.4.0-1_amd64.deb
-	sha256sums = d7c78cb32de7ee9a55dd5322b0d902c57422843cfd8661be17863d1d2d31f41a
+	sha256sums = 8e64808297697d44f3c624965742f0a0c16277e1e67bb4a2b28abc13debcd489
 
 pkgname = pkgview-bin
