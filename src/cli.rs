@@ -1,5 +1,6 @@
 //! Headless commands: `info`, `list`, `extract`, `verify`.
 
+use crate::library::{self, Integrity, Licence};
 use crate::pkg::{self, ExtractOptions, Overwrite, Pkg, Progress};
 use anyhow::{bail, Context};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -45,6 +46,34 @@ pub enum Cmd {
         /// One JSON object per package, one per line
         #[arg(long)]
         json: bool,
+    },
+    /// Check a collection: SHA-1, cut-off downloads, duplicates, patches/add-ons without their game, licences
+    Audit {
+        /// .pkg files and/or folders (searched recursively)
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Skip the SHA-1 check (reads only headers: instant)
+        #[arg(long)]
+        no_hash: bool,
+        /// One JSON object per package, one per line
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rename packages from their PARAM.SFO and header fields; preview with --dry-run, reverse with --undo
+    Rename {
+        /// .pkg files and/or folders (searched recursively)
+        #[arg(required_unless_present = "undo")]
+        paths: Vec<PathBuf>,
+        /// {TITLE} {TITLE_ID} {CONTENT_ID} {APP_VER} {VERSION} {CATEGORY} {KIND} {REGION}; a […] group with an
+        /// empty field is left out
+        #[arg(short, long, default_value = library::DEFAULT_TEMPLATE)]
+        template: String,
+        /// Show what would be renamed, change nothing
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+        /// Reverse the last rename run
+        #[arg(long, conflicts_with_all = ["paths", "dry_run"])]
+        undo: bool,
     },
     /// Write one file from the package to stdout (PATH as shown by `list`, without the root)
     Cat { file: PathBuf, path: String },
@@ -119,6 +148,7 @@ fn each<T: AsRef<Path>>(
 
 /// A JSON value, written compactly. Enough for `--json`; no parsing.
 enum J {
+    Null,
     S(String),
     N(u64),
     B(bool),
@@ -159,6 +189,7 @@ fn json_str(s: &str, f: &mut std::fmt::Formatter) -> std::fmt::Result {
 impl std::fmt::Display for J {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            J::Null => f.write_str("null"),
             J::S(s) => json_str(s, f),
             J::N(n) => write!(f, "{n}"),
             J::B(b) => write!(f, "{b}"),
@@ -332,6 +363,183 @@ fn verify(file: &Path, prefix: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// "Hashing 3/12" on stderr, redrawn in place when stderr is a terminal.
+fn progress_line(what: &'static str, total: usize) -> impl Fn(usize) + Sync {
+    // SAFETY: isatty only inspects the descriptor.
+    let tty = unsafe { libc::isatty(2) } == 1;
+    move |n| {
+        if tty {
+            eprint!("\r{what} {n}/{total}…");
+            if n == total {
+                eprint!("\r\x1b[K");
+            }
+        }
+    }
+}
+
+fn audit(paths: &[PathBuf], no_hash: bool, json: bool) -> anyhow::Result<()> {
+    let files = library::collect(paths);
+    if files.is_empty() {
+        bail!("no .pkg files in {paths:?}");
+    }
+    let records = library::scan(&files, progress_line("Reading", files.len()));
+    let mut found = library::audit(&records, &library::rpcs3_rap_dirs());
+    if !no_hash {
+        let n = found.iter().filter(|f| f.integrity.is_none()).count();
+        library::hash_all(&records, &mut found, progress_line("Hashing", n));
+    }
+    let name = |n: usize| records[n].path.display().to_string();
+    let mut bad = 0;
+    let (mut dups, mut orphans, mut missing) = (0, 0, 0);
+    for (n, (r, f)) in records.iter().zip(&found).enumerate() {
+        let integrity = f.integrity.clone().unwrap_or(Integrity::Unchecked);
+        bad += integrity.is_bad() as usize;
+        dups += (f.duplicate_of.is_some() || f.same_version_as.is_some()) as usize;
+        orphans += f.orphan as usize;
+        missing += (f.licence == Some(Licence::Missing)) as usize;
+        let licence = match &f.licence {
+            Some(Licence::Found(_)) => "found",
+            Some(Licence::Missing) => "missing",
+            Some(Licence::NotNeeded) => "not needed",
+            _ => "unknown",
+        };
+        if json {
+            let mut o = vec![
+                ("file".to_string(), J::s(name(n))),
+                ("size".into(), J::N(r.size)),
+                ("integrity".into(), J::s(integrity.label())),
+            ];
+            match &r.info {
+                Ok(i) => o.extend([
+                    ("content_id".into(), J::s(i.content_id.as_str())),
+                    ("title_id".into(), J::s(i.title_id.as_str())),
+                    ("title".into(), J::s(i.title.as_str())),
+                    ("kind".into(), J::s(i.kind.label())),
+                    ("category".into(), J::s(i.category.as_str())),
+                    ("app_ver".into(), J::s(i.app_ver.as_str())),
+                    ("version".into(), J::s(i.version.as_str())),
+                ]),
+                Err(e) => o.push(("error".into(), J::s(e.as_str()))),
+            }
+            let opt = |x: Option<usize>| x.map_or(J::Null, |n| J::s(name(n)));
+            o.extend([
+                ("duplicate_of".into(), opt(f.duplicate_of)),
+                ("same_version_as".into(), opt(f.same_version_as)),
+                ("intact_copy".into(), opt(f.intact_copy)),
+                ("orphan".into(), J::B(f.orphan)),
+                ("for_disc_game".into(), J::B(f.for_disc)),
+                ("licence".into(), J::s(licence)),
+            ]);
+            if let Some(Licence::Found(p)) = &f.licence {
+                o.push(("licence_file".into(), J::s(p.to_string_lossy())));
+            }
+            println!("{}", J::O(o));
+            continue;
+        }
+        match &r.info {
+            Ok(i) => println!(
+                "{:<11} {:<12} {:<10} {:<6} {:<28} {}",
+                integrity.label(),
+                i.kind.label(),
+                i.title_id,
+                i.app_ver,
+                i.title.chars().take(28).collect::<String>(),
+                name(n)
+            ),
+            Err(e) => println!("{:<11} {}: {e}", integrity.label(), name(n)),
+        }
+        let note = |t: String| println!("            ↳ {t}");
+        if let Some(d) = f.duplicate_of {
+            note(format!("identical to {}", name(d)));
+        }
+        if let Some(d) = f.intact_copy {
+            note(format!("an intact copy is {}", name(d)));
+        }
+        if let Some(d) = f.same_version_as {
+            note(format!(
+                "same content ID and version as {}, but different bytes",
+                name(d)
+            ));
+        }
+        if let (true, Ok(i)) = (f.orphan, &r.info) {
+            note(format!(
+                "no game {} here for this {}",
+                i.title_id,
+                i.kind.label().to_lowercase()
+            ));
+        }
+        if f.for_disc {
+            note("for a disc game (its base is a disc, not a package)".into());
+        }
+        if let (Some(Licence::Missing), Ok(i)) = (&f.licence, &r.info) {
+            note(format!(
+                "needs a licence: no {}.rap next to it or in RPCS3",
+                i.content_id
+            ));
+        }
+    }
+    if !json {
+        let checked = if no_hash { " (SHA-1 not checked)" } else { "" };
+        println!(
+            "\n{} package(s){checked}: {} with problems, {dups} duplicate(s), {orphans} without their game, \
+             {missing} missing a licence",
+            records.len(),
+            bad
+        );
+    }
+    if bad > 0 {
+        bail!(
+            "{bad} of {} packages are damaged or unreadable",
+            records.len()
+        );
+    }
+    Ok(())
+}
+
+fn rename(paths: &[PathBuf], template: &str, dry_run: bool, undo: bool) -> anyhow::Result<()> {
+    let logs = library::log_dir();
+    if undo {
+        let log = library::last_log(&logs).context("nothing to undo: no rename log")?;
+        let (done, problems) = library::undo(&log)?;
+        for p in &problems {
+            eprintln!("pkgview: {p}");
+        }
+        println!("Reversed {done} rename(s) from {}", log.display());
+        if !problems.is_empty() {
+            bail!("{} could not be reversed", problems.len());
+        }
+        return Ok(());
+    }
+    library::check_template(template).map_err(|e| anyhow::anyhow!("template: {e}"))?;
+    let files = library::collect(paths);
+    let records = library::scan(&files, |_| {});
+    for r in &records {
+        if let Err(e) = &r.info {
+            eprintln!("pkgview: {}: {e} (left alone)", r.path.display());
+        }
+    }
+    let plan = library::plan(&records, template).map_err(|e| anyhow::anyhow!(e))?;
+    for (from, to) in &plan {
+        let to = to.file_name().unwrap_or_default().to_string_lossy();
+        println!("{} → {to}", from.display());
+    }
+    if plan.is_empty() {
+        println!("Nothing to rename.");
+    } else if dry_run {
+        println!(
+            "\n{} file(s) would be renamed (dry run, nothing changed).",
+            plan.len()
+        );
+    } else {
+        let (log, n) = library::apply(&plan, &logs)?;
+        println!(
+            "\nRenamed {n} file(s). Undo: pkgview rename --undo (log: {})",
+            log.display()
+        );
+    }
+    Ok(())
+}
+
 fn open(path: &Path) -> anyhow::Result<Pkg> {
     Pkg::open(path).with_context(|| path.display().to_string())
 }
@@ -400,6 +608,17 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
                 Ok(())
             })?
         }
+        Cmd::Audit {
+            paths,
+            no_hash,
+            json,
+        } => audit(&paths, no_hash, json)?,
+        Cmd::Rename {
+            paths,
+            template,
+            dry_run,
+            undo,
+        } => rename(&paths, &template, dry_run, undo)?,
         Cmd::Cat { file, path } => {
             let p = open(&file)?;
             let want = path.trim_matches('/');

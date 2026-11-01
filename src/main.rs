@@ -1,5 +1,6 @@
 mod cli;
 mod gui;
+mod library;
 mod pkg;
 
 use clap::Parser;

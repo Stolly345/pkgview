@@ -744,6 +744,23 @@ impl Pkg {
         Ok(pkg)
     }
 
+    /// An offset beyond the end: a cut-off download (UnexpectedEof) when the file is shorter than the
+    /// header's total size, otherwise a corrupt package.
+    fn past_end(&self, what: &str) -> io::Error {
+        if self.len < self.header.total_size {
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "the file is cut off ({} of {} bytes): download it again",
+                    thousands(self.len),
+                    thousands(self.header.total_size)
+                ),
+            )
+        } else {
+            bad(format!("{what} (corrupt package)"))
+        }
+    }
+
     fn table_cipher(&self) -> Cipher {
         match self.header.pkg_type {
             TYPE_DEBUG_PS3 => Cipher::Debug,
@@ -774,7 +791,7 @@ impl Pkg {
                 a.checked_add(buf.len() as u64)
                     .is_some_and(|end| end <= self.len)
             })
-            .ok_or_else(|| bad("pkg points past end of file (truncated or corrupt)"))?;
+            .ok_or_else(|| self.past_end("pkg points past the end of the file"))?;
         self.file.read_exact_at(buf, abs)?;
         Keystream::new(&self.header, c).apply(rel / 16, buf);
         Ok(())
@@ -842,7 +859,7 @@ impl Pkg {
                     .and_then(|s| s.checked_add(e.offset))
                     .and_then(|s| s.checked_add(self.header.data_offset));
                 if e.offset % 16 != 0 || end.is_none_or(|end| end > self.len) {
-                    return Err(bad(format!("{}: data lies outside the file", e.path)));
+                    return Err(self.past_end(&format!("{}: data lies outside the file", e.path)));
                 }
             }
             entries.push(e);
@@ -1231,6 +1248,10 @@ mod tests {
     /// Test-only pkg writer: header, records, names packed and 16-aligned, data, SHA-1 footer.
     /// Encryption is the same XOR keystream as decryption.
     fn build(pkg_type: u32, items: &[Item]) -> Vec<u8> {
+        build_id(pkg_type, items, "UP0001-NPUB12345_00-0000000000000001")
+    }
+
+    fn build_id(pkg_type: u32, items: &[Item], content_id: &str) -> Vec<u8> {
         let n = items.len();
         let mut name_offs = vec![];
         let mut cur = n * 32;
@@ -1268,7 +1289,7 @@ mod tests {
             total_size: 0,
             data_offset: 0x100,
             data_size: sec.len() as u64,
-            content_id: "UP0001-NPUB12345_00-0000000000000001".into(),
+            content_id: content_id.into(),
             qa_digest: *b"0123456789ABCDEF",
             data_riv: riv,
             sha1: [0; 20],
@@ -2197,6 +2218,128 @@ mod tests {
             fs::remove_dir_all(d).unwrap();
         }
         println!("{} real pkg(s) OK", pkgs.len());
+    }
+
+    /// A made-up collection for `audit`, `rename` and the library window:
+    /// `PKGVIEW_WRITE_COLLECTION=/tmp/c cargo test write_collection -- --ignored`. Game + identical copy +
+    /// its patch, a patch without its game, a patch for a disc game, a PS1 Classic (debug), the same one
+    /// corrupted, a cut-off download, a non-package, and a .rap for the game.
+    #[test]
+    #[ignore]
+    fn write_collection() {
+        let dir = PathBuf::from(
+            std::env::var("PKGVIEW_WRITE_COLLECTION").expect("set PKGVIEW_WRITE_COLLECTION"),
+        );
+        fs::create_dir_all(&dir).unwrap();
+        let icon = || Some(include_bytes!("../data/pkgview.png").to_vec());
+        let one = |t: u32, cid: &str, sfo_kv: &[(&str, &str)], extra: Vec<Item>| {
+            let mut items: Vec<Item> = vec![
+                ("PARAM.SFO", Some(sfo(sfo_kv)), 0),
+                ("ICON0.PNG", icon(), 0),
+            ];
+            items.extend(extra);
+            build_id(t, &items, cid)
+        };
+        let eboot = || {
+            (
+                "USRDIR/EBOOT.BIN",
+                Some([b"SCE\0".as_slice(), &noise(5000, 1)].concat()),
+                0,
+            )
+        };
+        let mut game = one(
+            TYPE_RETAIL_PS3,
+            "UP0001-NPUB12345_00-0000000000000001",
+            &[
+                ("CATEGORY", "HG"),
+                ("TITLE", "Demo Game: Deluxe"),
+                ("TITLE_ID", "NPUB12345"),
+                ("APP_VER", "01.00"),
+            ],
+            vec![("USRDIR", None, 0), eboot()],
+        );
+        add_meta(
+            &mut game,
+            &[(0x2, &5u32.to_be_bytes()), (0x3, &0x06u32.to_be_bytes())],
+        );
+        let end = game.len() - FOOTER_LEN as usize;
+        let digest = Sha1::digest(&game[..end]);
+        game[end..end + 20].copy_from_slice(&digest);
+        let patch = |cid: &str, id: &str, title: &str, ver: &str| {
+            one(
+                TYPE_RETAIL_PS3,
+                cid,
+                &[
+                    ("CATEGORY", "GD"),
+                    ("TITLE", title),
+                    ("TITLE_ID", id),
+                    ("APP_VER", ver),
+                ],
+                vec![("USRDIR", None, 0), eboot()],
+            )
+        };
+        let classic = one(
+            TYPE_DEBUG_PS3,
+            "JP0001-NPUJ00001_00-0000000000000001",
+            &[
+                ("CATEGORY", "1P"),
+                ("TITLE", "Demo Classic"),
+                ("TITLE_ID", "NPUJ00001"),
+                ("APP_VER", "01.00"),
+            ],
+            vec![
+                ("USRDIR", None, 0),
+                (
+                    "USRDIR/CONTENT/EBOOT.PBP",
+                    Some([b"\0PBP".as_slice(), &noise(3000, 2)].concat()),
+                    0,
+                ),
+            ],
+        );
+        let mut corrupt = classic.clone();
+        let at = corrupt.len() - 200;
+        corrupt[at] ^= 0xFF;
+        let p2 = patch(
+            "UP0001-NPUB12345_00-0000000000000002",
+            "NPUB12345",
+            "Demo Game: Deluxe",
+            "01.01",
+        );
+        let files: Vec<(&str, Vec<u8>)> = vec![
+            ("UP0001-NPUB12345_00-0000000000000001.pkg", game.clone()),
+            ("game copy.pkg", game),
+            ("patch.pkg", p2.clone()),
+            (
+                "lonely patch.pkg",
+                patch(
+                    "UP0001-NPUB99999_00-0000000000000001",
+                    "NPUB99999",
+                    "Lost Game",
+                    "01.02",
+                ),
+            ),
+            (
+                "disc patch.pkg",
+                patch(
+                    "UP0001-BLUS30001_00-0000000000000001",
+                    "BLUS30001",
+                    "Disc Game",
+                    "01.03",
+                ),
+            ),
+            ("classic.pkg", classic),
+            ("classic damaged.pkg", corrupt),
+            ("cut download.pkg", p2[..p2.len() / 2].to_vec()),
+            ("notes.pkg", b"not a package".to_vec()),
+        ];
+        for (name, bytes) in files {
+            fs::write(dir.join(name), bytes).unwrap();
+        }
+        fs::write(
+            dir.join("UP0001-NPUB12345_00-0000000000000001.rap"),
+            [7u8; 16],
+        )
+        .unwrap();
     }
 
     /// Writes a synthetic pkg for manual/CLI/GUI testing:
