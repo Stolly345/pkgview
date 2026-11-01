@@ -286,8 +286,7 @@ impl Ui {
                     b.append(&label("No metadata records."));
                 } else if let Some(meta) = meta {
                     b.append(&grid(&meta));
-                    let note =
-                        label("Decoded as RPCS3 does; not yet checked against a real package.");
+                    let note = label("Decoded as RPCS3 does; DRM type names are unconfirmed.");
                     note.add_css_class("dim-label");
                     note.add_css_class("caption");
                     b.append(&note);

@@ -26,7 +26,8 @@ export DISPLAY=:99 QT_QPA_PLATFORM=xcb
 Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
 sleep 1
 rc=0
-for p in $W/sample-*.pkg; do
+# SAMPLES=dir (mounted at /samples) adds real packages.
+for p in $W/sample-*.pkg $(ls /samples/*.pkg 2>/dev/null); do
     a=/w/$W/by-rpcs3; b=/w/$W/by-pkgview  # not /tmp: RPCS3 refuses temporary locations
     chmod -R u+rwX $a $b 2>/dev/null || true; rm -rf $a $b
     mkdir -p $a/.config/rpcs3/dev_hdd0 $b/.config/rpcs3/dev_hdd0
@@ -34,7 +35,7 @@ for p in $W/sample-*.pkg; do
     R=$!
     # Wait for the game folder, then until nothing changes for 4 s; press Return for RPCS3 dialogs.
     last=; same=0
-    for _ in $(seq 90); do
+    for _ in $(seq 300); do
         sleep 1
         xdotool key Return 2>/dev/null || true
         now=$(cd $a/.config/rpcs3/dev_hdd0 && find game -path game/TEST12345 -prune -o -type f -exec stat -c "%n %s" {} + 2>/dev/null | sort)
@@ -48,7 +49,7 @@ for p in $W/sample-*.pkg; do
     if diff -r -x TEST12345 -x "＄locks" $a/.config/rpcs3/dev_hdd0/game $b/.config/rpcs3/dev_hdd0/game; then
         echo "$(basename $p): identical ($(find $b/.config/rpcs3/dev_hdd0/game -type f | wc -l) files)"
     else
-        echo "$(basename $p): DIFFERENT (RPCS3 log: $W/rpcs3.log)"
+        echo "$(basename $p): DIFFERENT (RPCS3 log: $W/rpcs3.log)"; cp $W/rpcs3.log "$W/rpcs3-$(basename $p).log"
         rc=1
     fi
 done

@@ -633,8 +633,9 @@ pub fn pkg_name(path: &Path) -> String {
 }
 
 /// Package metadata: records after the header, not encrypted: id u32, size u32, data (big-endian).
-/// Layout from RPCS3's `package_reader::read_metadata` (rpcs3/Crypto/unpkg.cpp). Not yet checked against a
-/// real package by this project; a malformed block only leaves fields empty, it never fails `open`.
+/// Layout from RPCS3's `package_reader::read_metadata` (rpcs3/Crypto/unpkg.cpp); checked on two real PSN
+/// packages (versions, system software, size agree with PARAM.SFO). A malformed block only leaves fields empty,
+/// it never fails `open`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Metadata {
     /// 0x1

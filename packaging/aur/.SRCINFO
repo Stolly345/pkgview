@@ -19,6 +19,6 @@ pkgbase = pkgview-bin
 	options = !debug
 	options = !strip
 	source = https://github.com/Stolly345/pkgview/releases/download/v2.8.0/pkgview_2.8.0-1_amd64.deb
-	sha256sums = 2ac6fa07861c3466cb07b4584ba16e16812c3e8916c98f2ed1784939effa0b52
+	sha256sums = 4a75392e89bac27120ef1e9cf53e6c5b11f4c808dd908f2a8e1f097d9641da0a
 
 pkgname = pkgview-bin

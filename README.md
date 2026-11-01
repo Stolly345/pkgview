@@ -195,8 +195,9 @@ again if the install fails or is cancelled. `dev_hdd0` comes from RPCS3's `vfs.y
 config folder), native install first, then Flatpak. **Compared with RPCS3 itself:**
 `make compare-rpcs3` installs the test packages with RPCS3's own installer (`rpcs3 --installpkg`) and with
 PkgView and compares the trees byte for byte. On 2026-11-01, with RPCS3 0.0.43-20550, the debug PS3, retail PS3
-and PSP test games came out identical. Not yet compared: DLC, patches over an installed game, PS1 Classics, real
-packages. `RPCS3_APPIMAGE=path` uses a local AppImage instead of downloading the latest.
+and PSP test games came out identical, and so did two real PSN packages (a 1.67 GB retail game, 89 files, and a
+5 MB debug package for the same game). Not yet compared: DLC, patches over an installed game, PS1 Classics.
+`RPCS3_APPIMAGE=path` uses a local AppImage instead of downloading the latest; `SAMPLES=dir` adds real packages.
 
 ## PKG format (as implemented by the original)
 
@@ -296,23 +297,26 @@ All of this was checked on a retail PSN package (P.T., EU): every offset, the th
 - **Real packages** (`make realtest`, `make compare SAMPLES=…`): 3 debug PS3 pkgs (PS1 Classics, 60–365 MB,
   16 entries each, metadata at `0xC0` and `0x280`). All three pass the SHA-1 check, their PARAM.SFO TITLE_ID
   matches the content ID, every entry extracts at its recorded size, and the original's code produces the same
-  bytes. No retail, PSP, >4 GB or split pkgs were available.
+  bytes. Since 2026-11-01 also two PSN packages of one game: a **retail** PS3 pkg (1.67 GB, 97 entries, 70+ EDAT
+  files) and a debug one (6 entries), both with metadata. Both pass SHA-1 and the header check, and the original's
+  code produces the same bytes. No PSP, >4 GB or split pkgs have been available.
 - The other crypto and format tests in `src/pkg.rs` run against **synthetic** pkgs built by a test-only writer
   that uses the same keystream code. They catch regressions and bad bounds handling, not a misreading of the format.
   Exception: `entry_beyond_4gib` encrypts with an independent counter (u128 / RPCS3-style) and puts an entry
   4 GiB into a sparse file, for all three key types: no 32-bit offset or counter on the read path.
 - **Header check magic bytes** (`verify`, Properties → Verify) were compared with the files of a real PS3 disc
-  game folder: `PARAM.SFO` `\0PSF`, `ICON0/PIC1.PNG` `\x89PNG`, `EBOOT.BIN` and `.self` `SCE\0`. PBP/EDAT/SDAT
-  magics come from psdevwiki and are unconfirmed on a real file.
+  game folder: `PARAM.SFO` `\0PSF`, `ICON0/PIC1.PNG` `\x89PNG`, `EBOOT.BIN` and `.self` `SCE\0`; `.EDAT` `NPD\0` on the
+  real retail package above. PBP/SDAT magics come from psdevwiki and are unconfirmed on a real file.
 - **Verified:** the SHA-1 covers `[0, EOF−32)` (per psdevwiki); checked on the real packages above.
 - **Verified:** PARAM.SFO layout (little-endian `\0PSF` header, 16-byte index entries); real SFOs parse.
 - **Settled from source, not a sample:** key handling for `0x90` entries in debug pkgs matches RPCS3 (see Differences).
 - **PS4 (2.8.0):** header, entry table, name table and all three digests checked on one retail PSN package
   (a full game, 1.35 GB); `pkgview verify` takes 3.4 s on it (file in page cache). The PS4 kinds `gp` (patch)
   and `ac` (add-on) are from documentation; only `gd` was seen on a real package.
-- **UNVERIFIED on a real package:** the metadata decoding (2.5.0). Its layout and names follow RPCS3's source and
-  are unit-tested on synthetic records, but no real package with metadata was available when it was written
-  (the earlier samples had metadata at `0xC0` and `0x280`; they are no longer on hand).
+- **Metadata decoding (2.5.0) checked on two real packages:** the package version, app version and required
+  system software read from the metadata equal PARAM.SFO's VERSION, APP_VER and PS3_SYSTEM_VER, the package size
+  equals the header's, and the content type (Game) matches CATEGORY HG. Still **unverified**: what the DRM type
+  numbers mean (both had 3, shown as "Free"), and flag names other than the ones these packages carry.
 
 ## Performance
 
