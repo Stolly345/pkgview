@@ -3,6 +3,7 @@
 
 mod dialogs;
 mod extract;
+mod inspect;
 mod settings;
 mod window;
 
@@ -146,6 +147,11 @@ struct Ui {
     /// The four file views (big/small icons, list, details), one visible.
     views: gtk::Stack,
     list_store: gio::ListStore,
+    /// Inspector pane (F9): its scroller (shown/hidden) and the box its content goes in.
+    inspector_pane: gtk::ScrolledWindow,
+    inspector: gtk::Box,
+    /// Bumped per refresh; a worker result for an older one is dropped.
+    inspect_gen: Cell<u64>,
     /// Selection over the sorted view of `list_store`: index rows through this, not the store.
     list_sel: gtk::MultiSelection,
     path_col: gtk::ColumnViewColumn,

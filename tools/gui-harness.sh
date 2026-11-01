@@ -10,7 +10,9 @@ export HOME=$W GDK_BACKEND=x11 DISPLAY=:99 NO_AT_BRIDGE=1 GSETTINGS_BACKEND=memo
 rm -rf "$OUT" && mkdir -p "$OUT"
 Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
 XV=$!
-trap 'rc=$?; kill $XV 2>/dev/null; pkill -f "$B" 2>/dev/null; rm -rf "$W" 2>/dev/null; exit $rc' EXIT
+# Watchdog: a step waiting for a window that never comes (xdotool --sync) must not hang forever.
+(sleep 300 && echo "gui-harness: TIMEOUT after 300 s" >&2 && kill $$) &
+trap 'rc=$?; set +e; kill $XV 2>/dev/null; pkill -f "$B" 2>/dev/null; rm -rf "$W"; exit $rc' EXIT
 sleep 1
 
 PKGVIEW_WRITE_SAMPLE=$W/demo.pkg PKGVIEW_SAMPLE_DEMO=1 cargo test -q write_sample -- --ignored >/dev/null 2>&1
@@ -22,7 +24,16 @@ focus() { xdotool windowactivate --sync "$(win "$1")" 2>/dev/null || xdotool win
 
 "$B" "$W/demo.pkg" 2>>"$OUT/stderr.log" &
 win "PkgView" >/dev/null
-shot main 2
+shot main-inspector-overview 2
+
+# Inspector: click rows of the root folder (Details view, rows ~33 px apart from y=109).
+row() { eval "$(xdotool getwindowgeometry --shell "$(win PkgView)")"; xdotool mousemove $((X + 330)) $((Y + 76 + 33 * $1)) click 1; }
+focus "PkgView"
+row 2; shot inspector-sfo
+row 3; shot inspector-image
+row 4; shot inspector-hex
+key F9; shot inspector-hidden
+key F9
 
 # Tree: right-click a folder that is NOT selected; it must become selected (row under the pointer).
 focus "PkgView"
@@ -59,6 +70,13 @@ shot search-results
 eval "$(xdotool getwindowgeometry --shell "$(win PkgView)")"
 xdotool mousemove $((X + 300)) $((Y + 156)) click --repeat 2 --delay 120 1
 shot search-jump
+# The inspector follows: level2.dat is selected, so its hex shows. Then a text file.
+key ctrl+f
+xdotool type --delay 20 "readme"
+sleep 1 # the result list must have replaced the folder before the double-click
+eval "$(xdotool getwindowgeometry --shell "$(win PkgView)")"
+xdotool mousemove $((X + 330)) $((Y + 156)) click --repeat 2 --delay 120 1
+shot inspector-text
 
 # Properties + Verify.
 key ctrl+i

@@ -112,6 +112,7 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
         ("win.forward", &["<Alt>Right"]),
         ("win.up", &["<Alt>Up"]),
         ("win.shortcuts", &["<Control>question"]),
+        ("win.inspector", &["F9"]),
     ] {
         app.set_accels_for_action(action, keys);
     }
@@ -120,7 +121,7 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
         .application(app)
         .title("PkgView")
         .icon_name("pkgview")
-        .default_width(860)
+        .default_width(1120)
         .default_height(580)
         .build();
 
@@ -320,6 +321,12 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
         .hexpand(true)
         .build();
     toolbar.append(&crumb_scroll);
+    let inspect_btn = gtk::ToggleButton::builder()
+        .icon_name("sidebar-show-right-symbolic")
+        .tooltip_text("Inspector: preview and package details (F9)")
+        .action_name("win.inspector")
+        .build();
+    inspect_btn.update_property(&[gtk::accessible::Property::Label("Inspector")]);
     let mut group: Option<gtk::ToggleButton> = None;
     for (name, label) in [
         ("large", "Big icons"),
@@ -341,6 +348,8 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
         toolbar.append(&b);
         group = Some(b);
     }
+    toolbar.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+    toolbar.append(&inspect_btn);
 
     let search_entry = gtk::SearchEntry::builder()
         .placeholder_text("Search this package: name or path, * and ? wildcards")
@@ -365,9 +374,36 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
     status_bar.append(&spinner);
     status_bar.append(&status);
 
+    // Inspector: right of the file views, its width kept when the window resizes.
+    let inspector = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    for m in [
+        gtk::Widget::set_margin_start,
+        gtk::Widget::set_margin_end,
+        gtk::Widget::set_margin_top,
+        gtk::Widget::set_margin_bottom,
+    ] {
+        m(inspector.upcast_ref(), 10);
+    }
+    let inspector_pane = gtk::ScrolledWindow::builder()
+        .child(&inspector)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .width_request(360)
+        .visible(settings.get("inspector").is_none_or(|v| v == "true"))
+        .build();
+    let right = gtk::Paned::new(gtk::Orientation::Horizontal);
+    right.set_start_child(Some(&views));
+    right.set_end_child(Some(&inspector_pane));
+    right.set_resize_end_child(false);
+    right.set_shrink_end_child(false);
+    window.add_action(&gio::PropertyAction::new(
+        "inspector",
+        &inspector_pane,
+        "visible",
+    ));
+
     let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
     paned.set_start_child(Some(&gtk::ScrolledWindow::builder().child(&tree).build()));
-    paned.set_end_child(Some(&views));
+    paned.set_end_child(Some(&right));
     paned.set_position(240);
 
     // Welcome page (nothing open): big hint + recent files.
@@ -408,6 +444,9 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
         window: window.clone(),
         views: views.clone(),
         main_stack,
+        inspector_pane: inspector_pane.clone(),
+        inspector,
+        inspect_gen: Cell::new(0),
         tree: tree.clone(),
         tree_sel: tree_sel.clone(),
         list_store,
@@ -440,7 +479,15 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
         }
     });
     let u = ui.clone();
-    list_sel.connect_selection_changed(move |_, _, _| u.update_status());
+    list_sel.connect_selection_changed(move |_, _, _| {
+        u.update_status();
+        u.inspect();
+    });
+    let u = ui.clone();
+    inspector_pane.connect_visible_notify(move |p| {
+        let _ = u.settings.set("inspector", &p.get_visible().to_string());
+        u.inspect();
+    });
 
     // Search
     let u = ui.clone();
@@ -596,6 +643,7 @@ impl Ui {
         self.tree_sel.set_selected(0);
         self.show_folder("");
         self.main_stack.set_visible_child_name("browser");
+        self.inspect(); // the refresh in show_folder ran while this page was still hidden
         self.window.set_title(Some(&format!("PkgView — {title}")));
         for a in [
             "extract-here",
@@ -653,6 +701,7 @@ impl Ui {
         *self.summary.borrow_mut() = s.join(" and ");
         self.update_status();
         self.update_crumbs(folder);
+        self.inspect();
     }
 
     /// Path bar: one flat button per folder level, the current one in bold.

@@ -1,10 +1,10 @@
 # PkgView — Product Requirements Document
 
-2026-10-25 · updated 2026-10-31 after an outside review · 2.4.0 shipped and published 2026-11-01 · Alex Stoll
+2026-10-25 · updated 2026-10-31 after an outside review · 2.4.0 shipped and published 2026-11-01 · 2.5.0 built 2026-11-01 · Alex Stoll
 
 ## Overview
 
-PkgView is a native Linux desktop app and CLI that browses, verifies and extracts Sony PS3/PSP `.pkg` installation packages. Version 2.4.0 is current and is the first published release: public at [github.com/Stolly345/pkgview](https://github.com/Stolly345/pkgview) since 2026-11-01, as a `.deb`, an `.rpm` and an Arch PKGBUILD. (2.3.1 was prepared for release but only ever installed locally.) It is a Rust/GTK 4 rewrite of PkgView 1.3 (VB.NET/WinForms, 2010–2012, by Ifcaro), shipped as a `.deb`. Through 2.3.x it supports Debian 12+ and Ubuntu 24.04+; from 2.4.0 it supports Debian 13+ and Ubuntu 24.04+ (see Decisions).
+PkgView is a native Linux desktop app and CLI that browses, verifies and extracts Sony PS3/PSP `.pkg` installation packages. Version 2.5.0 is built (not yet published); 2.4.0 is the first published release: public at [github.com/Stolly345/pkgview](https://github.com/Stolly345/pkgview) since 2026-11-01, as a `.deb`, an `.rpm` and an Arch PKGBUILD. (2.3.1 was prepared for release but only ever installed locally.) It is a Rust/GTK 4 rewrite of PkgView 1.3 (VB.NET/WinForms, 2010–2012, by Ifcaro), shipped as a `.deb`. Through 2.3.x it supports Debian 12+ and Ubuntu 24.04+; from 2.4.0 it supports Debian 13+ and Ubuntu 24.04+ (see Decisions).
 
 This PRD fixes what the product must do through 2.7.0: the features already shipped, the ones planned, and the bar each release must clear. Implementation detail lives in `README.md` and the code's tests.
 
@@ -34,7 +34,7 @@ On Linux the original Windows tool only runs under Mono: it's slow, works one fi
 
 The primary user is someone on a GNOME desktop (Ubuntu 24.04+ or Debian 13+) with a collection of PS3/PSP packages, for example PS1 Classics of 60–365 MB. They're comfortable in a terminal but use the GUI day to day.
 
-| # | Use case | Status at 2.4.0 → target |
+| # | Use case | Status at 2.5.0 → target |
 | --- | --- | --- |
 | 1 | Double-click a `.pkg` in Files and see what is inside | Supported |
 | 2 | Find one file (e.g. `ICON0.PNG`, `PARAM.SFO`) and open or drag it out | Supported |
@@ -42,8 +42,8 @@ The primary user is someone on a GNOME desktop (Ubuntu 24.04+ or Debian 13+) wit
 | 4 | Extract a folder of packages in one go and see which failed | Supported; Retry failed in 2.6.0 |
 | 5 | Check a download is intact (SHA-1) before using it | Supported; a whole folder at once in 2.6.0 |
 | 6 | Right-click packages in Files → Extract Here, with game-icon thumbnails | Supported |
-| 7 | Read a package's title, Title ID, category, versions and DRM without extracting it | Partly (PARAM.SFO title); full in 2.5.0 |
-| 8 | Script it: `info`, `list`, `extract`, `verify`, `cat` from the shell | Supported; JSON and `cat` in 2.5.0 |
+| 7 | Read a package's title, Title ID, category, versions and DRM without extracting it | Supported (2.5.0: inspector, `info`) |
+| 8 | Script it: `info`, `list`, `extract`, `verify`, `cat` from the shell | Supported, with `--json` (2.5.0) |
 | 9 | Turn `UP9000-NPUJ00944_00-….pkg` into a readable name | 2.6.0 |
 | 10 | Audit a folder: corrupt files, duplicates, patches or DLC with no base game, missing `.rap` | 2.6.0 |
 | 11 | See title and Title ID as columns in Files without opening PkgView | 2.6.0 |
@@ -75,10 +75,10 @@ Thirteen requirement groups shipped in 2.0–2.3; the rest land one release at a
 | F17 | CLI | Fixed exit codes: 0 = all OK, 1 = at least one package or entry failed, 2 = usage error. The failure count goes in the output, never in the exit status (8-bit, wraps at 256). `extract` and `verify` accept several packages | Must | 2.4.0 | Shipped |
 | F18 | Platform | Raise the GTK floor to 4.14 (`v4_14`): `FileDialog` instead of `FileChooserNative`; the tree's right-click acts on the row under the pointer; search results and history scroll to the item. Delete the 4.8 workarounds | Should | 2.4.0 | Shipped |
 | F19 | Open | Files opened or dragged out stay in `~/.cache/pkgview/open/<pid>/` until the next start (the existing stale-PID sweep removes them) instead of being deleted at exit while a viewer may still have them open | Should | 2.4.0 | Shipped |
-| F20 | Info | Inspector pane (toggle, right side): image preview, text, hex, PARAM.SFO as a full key table (TITLE, TITLE_ID, CATEGORY, APP_VER, VERSION, PS3_SYSTEM_VER, resolution/sound flags), and the package metadata block (content type, DRM type, package version). Fields not confirmed on a real package are labelled UNVERIFIED | Must | 2.5.0 | Planned |
-| F21 | CLI | `--json` on `info`, `list`, `verify` (one object per package; `--jsonl` for several). No CSV: `jq` covers it | Must | 2.5.0 | Planned |
-| F22 | CLI | `pkgview cat FILE.pkg PATH` streams one entry to stdout, no temp files | Should | 2.5.0 | Planned |
-| F23 | Core | Debug keystream generated on several threads (`std::thread::scope`, no new crate). Every real sample is a debug pkg, so this is the common case | Could | 2.5.0 | Planned |
+| F20 | Info | Inspector pane (toggle, right side): image preview, text, hex, PARAM.SFO as a full key table (TITLE, TITLE_ID, CATEGORY, APP_VER, VERSION, PS3_SYSTEM_VER, resolution/sound flags), and the package metadata block (content type, DRM type, package version). Fields not confirmed on a real package are labelled UNVERIFIED | Must | 2.5.0 | Shipped |
+| F21 | CLI | `--json` on `info`, `list`, `verify`: one compact object per package per line, so one package is JSON and several are JSON Lines (no separate `--jsonl`); errors as `{"file","error"}`. No CSV: `jq` covers it | Must | 2.5.0 | Shipped |
+| F22 | CLI | `pkgview cat FILE.pkg PATH` streams one entry to stdout, no temp files | Should | 2.5.0 | Shipped |
+| F23 | Core | Debug keystream generated on several threads (`std::thread::scope`, no new crate). Every real sample is a debug pkg, so this is the common case | Could | 2.5.0 | Shipped |
 | F24 | Collection | `pkgview rename [--dry-run] FILE…` and a GUI bulk action: template from SFO/header fields (default `{TITLE} [{TITLE_ID}] [v{APP_VER}] [{CATEGORY}].pkg`), shown as a preview before anything changes, undoable from a rename log | Must | 2.6.0 | Planned |
 | F25 | Collection | `pkgview audit DIR` (+ `--json`): SHA-1 status (OK / CORRUPT / TRUNCATED) for every pkg; duplicates (same SHA-1, or same content ID + version); patches and DLC with no base game for their Title ID. Packages are hashed on several threads; one bad pkg never stops the run | Must | 2.6.0 | Planned |
 | F26 | Collection | Library view in the GUI: open a folder → icon grid / table with title, Title ID, category, version, size and audit status; sort, filter, open, extract, rename. Uses the same scan as F25 | Should | 2.6.0 | Planned |
@@ -98,12 +98,18 @@ Output must match the original tool byte for byte on every retail package and ev
 - **Untrusted input:** reject `..`, absolute paths, NUL and `\` in names; bounds-check every offset and size; cap allocations; never panic on corrupt data (fuzz-tested). Two entries landing on the same path are renamed deterministically (already implemented). From 2.4.0, never write through a symlink (F16).
 - **Read-only:** packages are never opened for writing; a cancelled or failed file is deleted, never left half-written.
 
-| Check | How | Result at 2.4.0 |
+| Check | How | Result at 2.5.0 |
 | --- | --- | --- |
-| Unit tests | 19 tests: crypto round-trip for all 3 types, wrong key, malicious input (incl. far-away names), fuzz, options, Ask hook, symlinks, free space, header check, >4 GiB sparse entry (independent counter), search, history, CLI args | Pass |
-| GUI | `make gui`: Xvfb + xdotool, 12 screenshots (tree right-click, Extract dialog, Ask round trip + cancel, search jump, Verify, `--extract-to` cancel/extract, `--extract-here` + Replace All) | Pass, inspected |
+| Unit tests | 25 tests (2.5.0 adds: metadata records incl. truncated/garbled blocks, metadata read from a pkg, parallel = serial debug keystream, `read_head`/`sfo`/`write_entry`, JSON writer escaping, text/hex detection). 2.4.0's 19: crypto round-trip for all 3 types, wrong key, malicious input (incl. far-away names), fuzz, options, Ask hook, symlinks, free space, header check, >4 GiB sparse entry (independent counter), search, history, CLI args | Pass |
+| GUI | `make gui`: Xvfb + xdotool, 18 screenshots (2.5.0 adds the inspector: package overview on open, PARAM.SFO table, image, hex, text, F9 hide); 2.4.0's 12 (tree right-click, Extract dialog, Ask round trip + cancel, search jump, Verify, `--extract-to` cancel/extract, `--extract-here` + Replace All) | Pass, inspected |
 | Original code | `make compare`: the original VB crypto compiled under Mono vs the port, synthetic pkgs of each type | Retail identical; debug differs only in the `0x90` entry |
 | Real packages | `make realtest` + `make compare SAMPLES=…` on 3 debug PS3 pkgs | SHA-1 OK, TITLE\_ID matches, identical to the original's output |
+
+**Checks added in 2.5.0** (all done):
+- **Metadata layout from source:** RPCS3's `read_metadata` and its `pkg_content_type` / `pkg_flag` enums; psdevwiki was unreachable (Cloudflare) and windsurfer1122's PSN_get_pkg_info names licence types (1 network, 2 local, 3 free) only for EDAT files, so DRM type names stay marked *unverified*. Not checked on a real package: none with metadata is on hand.
+- **Debug keystream speed:** 1 GiB debug entry extracts in 1.5–1.9 s on 16 threads (was 7.2 s), output identical (unit test against the single-threaded version).
+- **`cat` = `extract`** byte for byte; `cat … | head` exits cleanly; JSON output parsed by Python for `info`, `list`, `verify` incl. an unreadable file.
+- **Found while testing:** gtk-rs `is_visible()` is `gtk_widget_is_visible` (checks every parent up to the window), so the inspector skipped its first refresh before the window was shown; it uses `get_visible()`.
 
 **Checks added in 2.4.0** (all done):
 - **>4 GiB test** on a sparse file: an entry at data offset `0x1_0000_0040` decrypts correctly for all three key types, encrypted with an independent u128 / RPCS3-style counter. It also found a real bug: the item table was sized from the first entry's data offset (the original's assumption), so a pkg whose first entry lies far away made PkgView allocate and decrypt gigabytes. The table is now sized from where the names end, capped at 1 KiB per name.
@@ -116,7 +122,7 @@ Output must match the original tool byte for byte on every retail package and ev
 | Area | Requirement |
 | --- | --- |
 | Platform | Linux x86-64. Until 2.3.x: Debian 12+ / Ubuntu 24.04+, GTK ≥ 4.8. **From 2.4.0: Debian 13+ / Ubuntu 24.04+, GTK ≥ 4.14**, built in an `ubuntu:24.04` container (the oldest target; the host has no Rust toolchain) |
-| Performance | Retail extract ≥ 800 MB/s from page cache (measured 1 GiB in 1.2 s); debug 1 GiB in ≤ 8 s (measured 7.2 s; ≤ 2.5 s once F23 ships); SHA-1 verify 1 GiB in < 1 s; thumbnail of the largest pkg < 1 s; `audit` of 100 pkgs bounded by disk read speed |
+| Performance | Retail extract ≥ 800 MB/s from page cache (measured 1 GiB in 1.2 s); debug 1 GiB in ≤ 2.5 s on a 4+ core machine (measured 1.5–1.9 s on 16 threads in 2.5.0; was 7.2 s); SHA-1 verify 1 GiB in < 1 s; thumbnail of the largest pkg < 1 s; `audit` of 100 pkgs bounded by disk read speed |
 | Responsiveness | No GTK main-thread I/O over ~50 ms; extraction, open-file, verify and library scans run on worker threads with progress and cancel |
 | Security | Read-only input, path sanitising, bounds checks, no writes through symlinks, no shell in subprocess calls, temp files only under `~/.cache/pkgview/open/<pid>/` |
 | Reliability | One broken package never stops a bulk run, audit or rename; failures name the package and reason; partial files removed; renames are logged and reversible |
@@ -137,8 +143,8 @@ Output must match the original tool byte for byte on every retail package and ev
 | 2.3.0 | C | Thumbnails, Files menu, man page | Shipped |
 | 2.3.1 | — | Release prep: app ID, homepage, screenshots (installed locally, never published as a download) | Shipped |
 | 2.4.0 | D | **Safety + extract:** symlink-safe writes, exit codes, >4 GiB + `0x90` checks, GTK 4.14 floor, extract dialog, key test, keep opened files until next start (F14–F19) | Shipped; published 2026-11-01 (GitHub release v2.4.0: .deb + .rpm; Arch PKGBUILD in the repo) |
-| 2.5.0 | E | **Inspect:** inspector pane + full metadata, `--json`, `cat`, parallel debug keystream (F20–F23) | Next |
-| 2.6.0 | F | **Collection:** rename, audit, library view, `.rap` status, Files columns + Properties tab, Retry failed (F24–F29) | Planned |
+| 2.5.0 | E | **Inspect:** inspector pane + full metadata, `--json`, `cat`, parallel debug keystream (F20–F23) | Shipped (built 2026-11-01, not yet published) |
+| 2.6.0 | F | **Collection:** rename, audit, library view, `.rap` status, Files columns + Properties tab, Retry failed (F24–F29) | Next |
 | 2.7.0 | G | **Hand-off:** install to RPCS3; optional diff and DAT check (F30–F32) | Planned |
 
 Each phase ships as its own installable `.deb` and must pass the acceptance list below before the next starts.
@@ -205,7 +211,7 @@ The biggest risk is still narrow sample coverage: every real package so far is a
 | Debug pkgs with `0x90` entries: the port keeps the SHA-1 scheme, the original used the PSP AES key | One entry type may extract differently from the original | Settled 2026-10-31: RPCS3 does the same as the port |
 | PSP-key choice differs from RPCS3: bit `0x10000000` vs top byte `0x90`; RPCS3 also decrypts PSP entries' names with the PSP key in retail PS3 pkgs | A retail pkg with `0x10…`/`0x30…` PSP entries would extract garbled, or show garbled names | `verify`'s header check flags garbled known files; switch to RPCS3's rule if a real pkg shows it (would break byte-identity with the original, so only with evidence) |
 | Real samples are gone: the 3 debug PS3 pkgs used for 2.1–2.3 are no longer in `~/Downloads`, and the TV box share was offline on 2026-11-01 | `make realtest` / `make compare SAMPLES=` could not run for 2.4.0 | Find or re-download them before 2.5.0's metadata work; synthetic + original-code compare still pass |
-| Metadata block, DRM type and SFO category codes come from psdevwiki / RPCS3 | Wrong labels in the inspector, rename and audit | Validate on real pkgs; mark unconfirmed fields UNVERIFIED |
+| Metadata block, DRM type and SFO category codes come from RPCS3's source (psdevwiki unreachable) | Wrong labels in the inspector, `info` and (2.6.0) rename/audit | DRM names marked *unverified* in the UI; README lists metadata decoding as UNVERIFIED on a real pkg; check with the first real sample that has metadata |
 | Rename touches the user's real files | A bad template or bug renames a collection wrongly | Dry-run preview, rename log + undo, tested on a scratch copy only |
 | Install to RPCS3 may not match what RPCS3's own installer does (DLC placement, PS1 Classics) | Games that don't boot in RPCS3 | Compare a PkgView install with an RPCS3 install of the same package file by file before shipping F30 |
 | Raising the floor to GTK 4.14 drops Debian 12 | Debian 12 users have no package (2.3.1 was never published as a download) | Accepted 2026-10-31; they can build commit `4bfd30c` (2.3.1) from source. Publish a 2.3.1 `.deb` only if someone asks |

@@ -30,10 +30,24 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Print the header / properties table
-    Info { file: PathBuf },
+    /// Print the header, package metadata and PARAM.SFO
+    Info {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// One JSON object per package, one per line
+        #[arg(long)]
+        json: bool,
+    },
     /// List entries: flags, size, path
-    List { file: PathBuf },
+    List {
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// One JSON object per package, one per line
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write one file from the package to stdout (PATH as shown by `list`, without the root)
+    Cat { file: PathBuf, path: String },
     /// Extract packages into DIR/<pkg name>/ (default: next to each pkg); with one package, optionally
     /// only the given inner PATHs. Arguments after the first that end in .pkg are packages, others PATHs.
     Extract {
@@ -55,6 +69,9 @@ pub enum Cmd {
     Verify {
         #[arg(required = true)]
         files: Vec<PathBuf>,
+        /// One JSON object per package, one per line
+        #[arg(long)]
+        json: bool,
     },
     /// Write ICON0.PNG (or PIC1.PNG) scaled to fit SIZE as a PNG (freedesktop thumbnailer)
     #[command(hide = true)]
@@ -100,18 +117,205 @@ fn each<T: AsRef<Path>>(
     }
 }
 
+/// A JSON value, written compactly. Enough for `--json`; no parsing.
+enum J {
+    S(String),
+    N(u64),
+    B(bool),
+    A(Vec<J>),
+    O(Vec<(String, J)>),
+}
+
+impl J {
+    fn s(v: impl Into<String>) -> J {
+        J::S(v.into())
+    }
+    fn o<const N: usize>(fields: [(&str, J); N]) -> J {
+        J::O(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
+    }
+}
+
+fn json_str(s: &str, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    f.write_str("\"")?;
+    for c in s.chars() {
+        match c {
+            '"' => f.write_str("\\\"")?,
+            '\\' => f.write_str("\\\\")?,
+            '\n' => f.write_str("\\n")?,
+            '\r' => f.write_str("\\r")?,
+            '\t' => f.write_str("\\t")?,
+            c if (c as u32) < 0x20 => write!(f, "\\u{:04x}", c as u32)?,
+            c => write!(f, "{c}")?,
+        }
+    }
+    f.write_str("\"")
+}
+
+impl std::fmt::Display for J {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            J::S(s) => json_str(s, f),
+            J::N(n) => write!(f, "{n}"),
+            J::B(b) => write!(f, "{b}"),
+            J::A(v) => {
+                f.write_str("[")?;
+                for (i, x) in v.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    write!(f, "{x}")?;
+                }
+                f.write_str("]")
+            }
+            J::O(v) => {
+                f.write_str("{")?;
+                for (i, (k, x)) in v.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(",")?;
+                    }
+                    json_str(k, f)?;
+                    write!(f, ":{x}")?;
+                }
+                f.write_str("}")
+            }
+        }
+    }
+}
+
+/// `each` for `--json`: prints the package's object, or `{"file":…,"error":…}`. The closure says whether the
+/// package passed (false = counted as failed after printing).
+fn json_each(
+    files: &[PathBuf],
+    f: impl Fn(&Path) -> anyhow::Result<(J, bool)>,
+) -> anyhow::Result<()> {
+    each(files, |p| {
+        let file = J::s(p.to_string_lossy());
+        match f(p) {
+            Ok((J::O(mut fields), ok)) => {
+                fields.insert(0, ("file".into(), file));
+                println!("{}", J::O(fields));
+                if ok {
+                    Ok(())
+                } else {
+                    bail!("failed")
+                }
+            }
+            Ok((j, _)) => unreachable!("json_each wants an object, got {j}"),
+            Err(e) => {
+                println!(
+                    "{}",
+                    J::o([("file", file), ("error", J::s(format!("{e:#}")))])
+                );
+                Err(e)
+            }
+        }
+    })
+}
+
+fn info_json(p: &Pkg) -> J {
+    let h = &p.header;
+    let m = &p.meta;
+    let mut meta = vec![];
+    let opt_s = |k: &str, v: &Option<String>, meta: &mut Vec<(String, J)>| {
+        if let Some(v) = v {
+            meta.push((k.into(), J::s(v.as_str())));
+        }
+    };
+    if let Some(v) = m.content_type {
+        meta.push(("content_type".into(), J::N(v as u64)));
+        meta.push((
+            "content_type_name".into(),
+            J::s(m.content_type_name().unwrap_or_default()),
+        ));
+    }
+    if let Some(v) = m.drm_type {
+        meta.push(("drm_type".into(), J::N(v as u64)));
+    }
+    if let Some(v) = m.package_flags {
+        meta.push(("package_flags".into(), J::N(v as u64)));
+        let names = m.flag_names().into_iter().map(J::s).collect();
+        meta.push(("package_flag_names".into(), J::A(names)));
+    }
+    if let Some(v) = m.package_size {
+        meta.push(("package_size".into(), J::N(v)));
+    }
+    opt_s("package_version", &m.package_version, &mut meta);
+    opt_s("app_version", &m.app_version, &mut meta);
+    opt_s("min_firmware", &m.min_firmware, &mut meta);
+    opt_s("title_id", &m.title_id, &mut meta);
+    opt_s("install_dir", &m.install_dir, &mut meta);
+    let sfo = p.sfo().into_iter().map(|(k, v)| (k, J::S(v))).collect();
+    J::o([
+        ("content_id", J::s(h.content_id.as_str())),
+        ("type", J::s(h.type_label())),
+        ("pkg_type", J::N(h.pkg_type as u64)),
+        ("root", J::s(h.root_folder())),
+        ("item_count", J::N(h.item_count as u64)),
+        ("total_size", J::N(h.total_size)),
+        ("data_offset", J::N(h.data_offset)),
+        ("data_size", J::N(h.data_size)),
+        ("metadata_offset", J::N(h.metadata_offset as u64)),
+        ("metadata_count", J::N(h.metadata_count as u64)),
+        ("header_size", J::N(h.header_size as u64)),
+        ("qa_digest", J::s(pkg::hex(&h.qa_digest))),
+        ("sha1", J::s(pkg::hex(&h.sha1))),
+        ("metadata", J::O(meta)),
+        ("sfo", J::O(sfo)),
+    ])
+}
+
+fn key_name(p: &Pkg, e: &pkg::Entry) -> &'static str {
+    match p.cipher_for(e) {
+        pkg::Cipher::Debug => "Debug",
+        pkg::Cipher::Ps3 => "PS3",
+        pkg::Cipher::Psp => "PSP",
+    }
+}
+
+fn list_json(p: &Pkg) -> J {
+    let entries = p
+        .entries
+        .iter()
+        .map(|e| {
+            J::o([
+                ("path", J::s(e.path.as_str())),
+                ("dir", J::B(e.is_dir())),
+                ("size", J::N(if e.is_dir() { 0 } else { e.size })),
+                ("offset", J::N(e.offset)),
+                ("flags", J::N(e.flags as u64)),
+                ("key", J::s(key_name(p, e))),
+            ])
+        })
+        .collect();
+    J::o([
+        ("root", J::s(p.header.root_folder())),
+        ("entries", J::A(entries)),
+    ])
+}
+
+/// SHA-1 result and the paths of known files that don't decrypt to their header.
+fn verify_checks(p: &Pkg) -> anyhow::Result<(bool, usize, Vec<String>)> {
+    let sha_ok = p.verify_sha1()?;
+    let checks = p.check_headers();
+    let bad = checks
+        .iter()
+        .filter(|c| !c.1)
+        .map(|&(i, _)| p.entries[i].path.clone())
+        .collect();
+    Ok((sha_ok, checks.len(), bad))
+}
+
 /// `verify` for one package: SHA-1, then the known-header check. Prints one line per check.
 fn verify(file: &Path, prefix: &str) -> anyhow::Result<()> {
     let p = Pkg::open(file)?;
-    let sha_ok = p.verify_sha1()?;
+    let (sha_ok, n_checks, bad) = verify_checks(&p)?;
     println!("{prefix}SHA-1 {}", if sha_ok { "OK" } else { "MISMATCH" });
-    let checks = p.check_headers();
-    let bad: Vec<&str> = checks
-        .iter()
-        .filter(|c| !c.1)
-        .map(|&(i, _)| p.entries[i].path.as_str())
-        .collect();
-    match (checks.len(), bad.len()) {
+    match (n_checks, bad.len()) {
         (0, _) => println!("{prefix}Headers: no known files to check"),
         (n, 0) => println!("{prefix}Headers OK ({n} known files decrypt correctly)"),
         (n, b) => println!(
@@ -134,31 +338,81 @@ fn open(path: &Path) -> anyhow::Result<Pkg> {
 
 pub fn run(cmd: Cmd) -> anyhow::Result<()> {
     match cmd {
-        Cmd::Info { file } => {
-            let p = open(&file)?;
-            let h = &p.header;
-            println!("{:<38} {:<20} Value", "Field", "Hex");
-            for [f, x, v] in h.rows() {
-                println!("{f:<38} {x:<20} {v}");
-            }
-            println!("Content ID  {}", h.content_id);
-            println!("QA digest   {}", pkg::hex_spaced(&h.qa_digest));
-            println!("SHA-1       {}", pkg::hex_spaced(&h.sha1));
-            for (k, v) in p.sfo_summary() {
-                println!("{k:<11} {v}");
-            }
+        Cmd::Info { files, json: true } => {
+            json_each(&files, |f| Ok((info_json(&Pkg::open(f)?), true)))?
         }
-        Cmd::List { file } => {
+        Cmd::Info { files, json: false } => {
+            let many = files.len() > 1;
+            each(&files, |f| {
+                let p = Pkg::open(f)?;
+                if many {
+                    println!("== {}", f.display());
+                }
+                let h = &p.header;
+                println!("{:<38} {:<20} Value", "Field", "Hex");
+                for [f, x, v] in h.rows() {
+                    println!("{f:<38} {x:<20} {v}");
+                }
+                println!("Content ID  {}", h.content_id);
+                println!("QA digest   {}", pkg::hex_spaced(&h.qa_digest));
+                println!("SHA-1       {}", pkg::hex_spaced(&h.sha1));
+                let meta = p.meta.rows();
+                if !meta.is_empty() {
+                    println!("\nPackage metadata");
+                    for (k, v) in meta {
+                        println!("  {k:<22} {v}");
+                    }
+                }
+                let sfo = p.sfo();
+                if !sfo.is_empty() {
+                    println!("\nPARAM.SFO");
+                    for (k, v) in sfo {
+                        println!("  {k:<22} {v}");
+                    }
+                }
+                if many {
+                    println!();
+                }
+                Ok(())
+            })?
+        }
+        Cmd::List { files, json: true } => {
+            json_each(&files, |f| Ok((list_json(&Pkg::open(f)?), true)))?
+        }
+        Cmd::List { files, json: false } => {
+            let many = files.len() > 1;
+            each(&files, |f| {
+                let p = Pkg::open(f)?;
+                let root = p.header.root_folder();
+                for e in &p.entries {
+                    let size = if e.is_dir() {
+                        "<DIR>".into()
+                    } else {
+                        e.size.to_string()
+                    };
+                    let file = if many {
+                        format!("{}: ", f.display())
+                    } else {
+                        String::new()
+                    };
+                    println!("{file}{:08X} {size:>14} {root}/{}", e.flags, e.path);
+                }
+                Ok(())
+            })?
+        }
+        Cmd::Cat { file, path } => {
             let p = open(&file)?;
-            let root = p.header.root_folder();
-            for e in &p.entries {
-                let size = if e.is_dir() {
-                    "<DIR>".into()
-                } else {
-                    e.size.to_string()
-                };
-                println!("{:08X} {size:>14} {root}/{}", e.flags, e.path);
+            let want = path.trim_matches('/');
+            let e = p
+                .entries
+                .iter()
+                .find(|e| e.path == want)
+                .with_context(|| format!("no entry {want:?} (see `pkgview list`)"))?;
+            if e.is_dir() {
+                bail!("{want} is a folder");
             }
+            let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+            p.write_entry(e, &mut out, &AtomicBool::new(false), &mut |_| {})?;
         }
         Cmd::Extract {
             args,
@@ -208,7 +462,22 @@ pub fn run(cmd: Cmd) -> anyhow::Result<()> {
                 Ok(())
             })?;
         }
-        Cmd::Verify { files } => {
+        Cmd::Verify { files, json: true } => json_each(&files, |f| {
+            let p = Pkg::open(f)?;
+            let (sha_ok, n, bad) = verify_checks(&p)?;
+            let ok = sha_ok && bad.is_empty();
+            let bad = bad.into_iter().map(J::S).collect();
+            Ok((
+                J::o([
+                    ("ok", J::B(ok)),
+                    ("sha1_ok", J::B(sha_ok)),
+                    ("headers_checked", J::N(n as u64)),
+                    ("headers_wrong", J::A(bad)),
+                ]),
+                ok,
+            ))
+        })?,
+        Cmd::Verify { files, json: false } => {
             let many = files.len() > 1;
             each(&files, |f| {
                 let prefix = if many {
@@ -289,6 +558,21 @@ mod tests {
         let (f, p) = split_extract_args(&a);
         assert_eq!(f.len(), 3);
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn json_writer() {
+        let j = J::o([
+            ("s", J::s("a\"b\\c\nd\u{1}é")),
+            ("n", J::N(42)),
+            ("b", J::B(false)),
+            ("a", J::A(vec![J::N(1), J::s("x")])),
+            ("o", J::o([])),
+        ]);
+        assert_eq!(
+            j.to_string(),
+            r#"{"s":"a\"b\\c\nd\u0001é","n":42,"b":false,"a":[1,"x"],"o":{}}"#
+        );
     }
 
     #[test]

@@ -151,6 +151,7 @@ impl Ui {
             ("Backspace, Alt+Up", "Up one folder"),
             ("Alt+Left / Alt+Right", "Back / forward"),
             ("F5", "Reload the package"),
+            ("F9", "Show or hide the inspector"),
             ("Ctrl+?", "This list"),
             ("Ctrl+Q", "Quit"),
         ]

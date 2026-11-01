@@ -30,7 +30,7 @@ const HEADER_LEN: usize = 0x80;
 const FOOTER_LEN: u64 = 32;
 const CHUNK: usize = 1 << 20;
 /// Largest entry `read_entry` will load into memory (PARAM.SFO / ICON0.PNG are tiny).
-const MAX_IN_MEMORY: u64 = 16 << 20;
+pub const MAX_IN_MEMORY: u64 = 16 << 20;
 
 fn bad(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
@@ -171,6 +171,10 @@ impl Header {
     }
 }
 
+pub fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 pub fn hex_spaced(b: &[u8]) -> String {
     b.iter()
         .map(|x| format!("{x:02X}"))
@@ -257,12 +261,23 @@ impl Keystream {
         debug_assert!(buf.len() % 16 == 0);
         match self {
             Keystream::Debug(k) => {
-                for (i, blk) in buf.chunks_exact_mut(16).enumerate() {
-                    let mut ctr = *k;
-                    add_be(&mut ctr, first + i as u64);
-                    let h = Sha1::digest(ctr);
-                    blk.iter_mut().zip(h.iter()).for_each(|(b, k)| *b ^= k);
+                // One SHA-1 per 16 bytes is CPU-bound (~140 MB/s on one core): spread big buffers over the
+                // cores. Blocks are independent, so the split changes nothing in the output.
+                let threads = if buf.len() >= 1 << 16 {
+                    std::thread::available_parallelism().map_or(1, |n| n.get())
+                } else {
+                    1
+                };
+                let per = (buf.len() / 16).div_ceil(threads) * 16;
+                if threads == 1 || per == 0 {
+                    return debug_xor(k, first, buf);
                 }
+                std::thread::scope(|s| {
+                    for (j, part) in buf.chunks_mut(per).enumerate() {
+                        let first = first + (j * per / 16) as u64;
+                        s.spawn(move || debug_xor(k, first, part));
+                    }
+                });
             }
             Keystream::Aes(aes, riv) => {
                 let mut ks: Vec<_> = (0..buf.len() as u64 / 16)
@@ -278,6 +293,16 @@ impl Keystream {
                 }
             }
         }
+    }
+}
+
+/// XOR `buf` with the debug keystream (SHA-1 of the 64-byte counter `k + n`) from block `first` on.
+fn debug_xor(k: &[u8; 64], first: u64, buf: &mut [u8]) {
+    for (i, blk) in buf.chunks_exact_mut(16).enumerate() {
+        let mut ctr = *k;
+        add_be(&mut ctr, first + i as u64);
+        let h = Sha1::digest(ctr);
+        blk.iter_mut().zip(h.iter()).for_each(|(b, k)| *b ^= k);
     }
 }
 
@@ -499,6 +524,170 @@ pub fn pkg_name(path: &Path) -> String {
         .map_or("pkg".into(), |s| s.to_string_lossy().into_owned())
 }
 
+/// Package metadata: records after the header, not encrypted: id u32, size u32, data (big-endian).
+/// Layout from RPCS3's `package_reader::read_metadata` (rpcs3/Crypto/unpkg.cpp). Not yet checked against a
+/// real package by this project; a malformed block only leaves fields empty, it never fails `open`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Metadata {
+    /// 0x1
+    pub drm_type: Option<u32>,
+    /// 0x2
+    pub content_type: Option<u32>,
+    /// 0x3, bit flags (`PKG_FLAGS`)
+    pub package_flags: Option<u32>,
+    /// 0x4
+    pub package_size: Option<u64>,
+    /// 0x5: package version, "01.00"
+    pub package_version: Option<String>,
+    /// 0x6
+    pub title_id: Option<String>,
+    /// 0x8: minimum system software, "03.41"
+    pub min_firmware: Option<String>,
+    /// 0x8: application version, "01.00"
+    pub app_version: Option<String>,
+    /// 0xA: install folder (DLC)
+    pub install_dir: Option<String>,
+}
+
+/// Content types, from RPCS3's `pkg_content_type`.
+const CONTENT_TYPES: &[(u32, &str)] = &[
+    (0x04, "Game data / patch"),
+    (0x05, "Game"),
+    (0x06, "PS1 Classic"),
+    (0x07, "PSP / PC Engine"),
+    (0x09, "Theme"),
+    (0x0A, "Widget"),
+    (0x0B, "License"),
+    (0x0C, "VSH module"),
+    (0x0D, "PSN avatar"),
+    (0x0E, "PSP go"),
+    (0x0F, "Minis"),
+    (0x10, "NEOGEO"),
+    (0x11, "Virtual memory card"),
+    (0x12, "PS2 Classic"),
+    (0x14, "PSP Remastered"),
+    (0x15, "PS Vita game data"),
+    (0x16, "PS Vita add-on"),
+    (0x17, "PS Vita LiveArea"),
+    (0x18, "PS Vita PSM"),
+    (0x19, "Web TV"),
+    (0x1F, "PS Vita theme"),
+];
+
+/// Package flag bits, from RPCS3's `pkg_flag`.
+const PKG_FLAGS: &[(u32, &str)] = &[
+    (0x02, "EBOOT"),
+    (0x04, "requires licence"),
+    (0x08, "HDD/MC"),
+    (0x10, "patch"),
+    (0x40, "rename directory"),
+    (0x80, "EDAT"),
+    (0x200, "emulator"),
+    (0x400, "VSH module"),
+    (0x800, "disc bound"),
+];
+
+impl Metadata {
+    fn parse(b: &[u8], count: u32) -> Metadata {
+        let mut m = Metadata::default();
+        let mut o = 0usize;
+        // BCD bytes → "01.00"
+        let ver = |x: &[u8]| format!("{:02X}.{:02X}", x[0], x[1]);
+        let text = |x: &[u8]| {
+            let x = &x[..x.iter().position(|&c| c == 0).unwrap_or(x.len())];
+            Some(String::from_utf8_lossy(x).trim().to_string()).filter(|s| !s.is_empty())
+        };
+        for _ in 0..count.min(64) {
+            let (Some(id), Some(size)) = (b.get(o..o + 4), b.get(o + 4..o + 8)) else {
+                break;
+            };
+            let (id, size) = (be32(id, 0), be32(size, 0) as usize);
+            let Some(d) = o.checked_add(8 + size).and_then(|end| b.get(o + 8..end)) else {
+                break;
+            };
+            match (id, d.len()) {
+                (0x1, 4) => m.drm_type = Some(be32(d, 0)),
+                (0x2, 4) => m.content_type = Some(be32(d, 0)),
+                (0x3, 4) => m.package_flags = Some(be32(d, 0)),
+                (0x4, 8) => m.package_size = Some(be64(d, 0)),
+                (0x5, 4) => m.package_version = Some(ver(&d[2..4])),
+                (0x6, 12) => m.title_id = text(d),
+                (0x8, 8) => {
+                    m.min_firmware = Some(ver(&d[1..3]));
+                    m.app_version = Some(ver(&d[6..8]));
+                }
+                (0xA, n) if n > 8 => m.install_dir = text(&d[8..]),
+                _ => {}
+            }
+            o += 8 + size;
+        }
+        m
+    }
+
+    pub fn content_type_name(&self) -> Option<&'static str> {
+        let c = self.content_type?;
+        Some(
+            CONTENT_TYPES
+                .iter()
+                .find(|t| t.0 == c)
+                .map_or("unknown", |t| t.1),
+        )
+    }
+
+    pub fn flag_names(&self) -> Vec<&'static str> {
+        let f = self.package_flags.unwrap_or(0);
+        PKG_FLAGS
+            .iter()
+            .filter(|p| f & p.0 != 0)
+            .map(|p| p.1)
+            .collect()
+    }
+
+    /// (label, value) for display. DRM type names are not confirmed by a code source (marked so).
+    pub fn rows(&self) -> Vec<(&'static str, String)> {
+        let mut r = vec![];
+        if let (Some(c), Some(name)) = (self.content_type, self.content_type_name()) {
+            r.push(("Content type", format!("{name} (0x{c:X})")));
+        }
+        if let Some(d) = self.drm_type {
+            let name = match d {
+                1 => "Network (unverified)",
+                2 => "Local (unverified)",
+                3 => "Free (unverified)",
+                _ => "unknown",
+            };
+            r.push(("DRM type", format!("{name} (0x{d:X})")));
+        }
+        if let Some(f) = self.package_flags {
+            r.push((
+                "Package flags",
+                format!("{} (0x{f:X})", self.flag_names().join(", ")),
+            ));
+        }
+        for (label, v) in [
+            ("Package version", &self.package_version),
+            ("App version", &self.app_version),
+            ("Needs system software", &self.min_firmware),
+            ("Title ID", &self.title_id),
+            ("Install folder", &self.install_dir),
+        ] {
+            if let Some(v) = v {
+                r.push((label, v.clone()));
+            }
+        }
+        if let Some(n) = self.package_size {
+            r.push(("Package size", round_bytes(n)));
+        }
+        r
+    }
+
+    /// Requires a licence (`.rap`) to run, per package flag 0x04.
+    #[cfg_attr(not(test), allow(dead_code))] // the .rap check (F27) uses it
+    pub fn needs_licence(&self) -> Option<bool> {
+        self.package_flags.map(|f| f & 0x04 != 0)
+    }
+}
+
 pub enum Progress<'a> {
     File(&'a Entry),
     Bytes(u64),
@@ -508,6 +697,7 @@ pub struct Pkg {
     file: File,
     len: u64,
     pub header: Header,
+    pub meta: Metadata,
     pub entries: Vec<Entry>,
 }
 
@@ -534,10 +724,20 @@ impl Pkg {
         ) {
             return Err(bad("This pkg is not supported."));
         }
+        // Metadata sits between its offset and the data section; read at most 64 KiB of it.
+        let (start, end) = (header.metadata_offset as u64, header.data_offset.min(len));
+        let meta = if start >= HEADER_LEN as u64 && start < end {
+            let mut b = vec![0u8; (end - start).min(1 << 16) as usize];
+            file.read_exact_at(&mut b, start)?;
+            Metadata::parse(&b, header.metadata_count)
+        } else {
+            Metadata::default()
+        };
         let mut pkg = Pkg {
             file,
             len,
             header,
+            meta,
             entries: vec![],
         };
         pkg.entries = pkg.read_table()?;
@@ -719,17 +919,18 @@ impl Pkg {
             .min_by_key(|e| e.path.matches('/').count())
     }
 
+    /// Every key of the package's PARAM.SFO (the shallowest one), in file order; empty if there is none.
+    pub fn sfo(&self) -> Vec<(String, String)> {
+        self.find("PARAM.SFO")
+            .and_then(|e| self.read_entry(e).ok())
+            .and_then(|b| parse_sfo(&b))
+            .unwrap_or_default()
+    }
+
     /// TITLE, TITLE_ID, APP_VER and CATEGORY from PARAM.SFO, if there is one.
     pub fn sfo_summary(&self) -> Vec<(String, String)> {
-        let Some(e) = self.find("PARAM.SFO") else {
-            return vec![];
-        };
-        let all = self
-            .read_entry(e)
-            .ok()
-            .and_then(|b| parse_sfo(&b))
-            .unwrap_or_default();
-        all.into_iter()
+        self.sfo()
+            .into_iter()
             .filter(|(k, _)| ["TITLE", "TITLE_ID", "APP_VER", "CATEGORY"].contains(&k.as_str()))
             .collect()
     }
@@ -738,9 +939,15 @@ impl Pkg {
         if e.size > MAX_IN_MEMORY {
             return Err(bad("entry too large to load into memory"));
         }
-        let mut buf = vec![0u8; e.size.next_multiple_of(16) as usize];
+        self.read_head(e, e.size)
+    }
+
+    /// The first `max` bytes of an entry (all of it if smaller), decrypted. For previews.
+    pub fn read_head(&self, e: &Entry, max: u64) -> io::Result<Vec<u8>> {
+        let n = e.size.min(max);
+        let mut buf = vec![0u8; n.next_multiple_of(16) as usize];
         self.read_decrypt(self.cipher_for(e), e.offset, &mut buf)?;
-        buf.truncate(e.size as usize);
+        buf.truncate(n as usize);
         Ok(buf)
     }
 
@@ -885,30 +1092,39 @@ impl Pkg {
         cancel: &AtomicBool,
         progress: &mut impl FnMut(Progress),
     ) -> io::Result<bool> {
-        let c = self.cipher_for(e);
         let mut out = BufWriter::new(create_nofollow(target)?);
-        let res = (|| {
-            let mut buf = vec![0u8; CHUNK];
-            let mut done = 0u64;
-            while done < e.size {
-                if cancel.load(Ordering::Relaxed) {
-                    return Ok(false);
-                }
-                let n = (e.size - done).min(CHUNK as u64) as usize;
-                // Last partial block: decrypt the whole block, write only what belongs to the file.
-                self.read_decrypt(c, e.offset + done, &mut buf[..n.next_multiple_of(16)])?;
-                out.write_all(&buf[..n])?;
-                done += n as u64;
-                progress(Progress::Bytes(n as u64));
-            }
-            out.flush()?;
-            Ok(true)
-        })();
+        let res = self.write_entry(e, &mut out, cancel, progress);
         if !matches!(res, Ok(true)) {
             drop(out);
             let _ = fs::remove_file(target);
         }
         res
+    }
+
+    /// Decrypt entry `e` into `out` in 1 MiB chunks (flushed at the end). Ok(false) if cancelled.
+    pub fn write_entry(
+        &self,
+        e: &Entry,
+        out: &mut dyn Write,
+        cancel: &AtomicBool,
+        progress: &mut dyn FnMut(Progress),
+    ) -> io::Result<bool> {
+        let c = self.cipher_for(e);
+        let mut buf = vec![0u8; CHUNK];
+        let mut done = 0u64;
+        while done < e.size {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(false);
+            }
+            let n = (e.size - done).min(CHUNK as u64) as usize;
+            // Last partial block: decrypt the whole block, write only what belongs to the file.
+            self.read_decrypt(c, e.offset + done, &mut buf[..n.next_multiple_of(16)])?;
+            out.write_all(&buf[..n])?;
+            done += n as u64;
+            progress(Progress::Bytes(n as u64));
+        }
+        out.flush()?;
+        Ok(true)
     }
 
     /// Decrypt the first block of every file of a known kind (PARAM.SFO, PNGs, EBOOT.BIN, SELF/SPRX, PBP,
@@ -1535,6 +1751,145 @@ mod tests {
         fs::remove_dir_all(d).unwrap();
     }
 
+    /// Metadata records: id u32, size u32, data.
+    fn meta(records: &[(u32, &[u8])]) -> Vec<u8> {
+        let mut b = vec![];
+        for (id, d) in records {
+            b.extend_from_slice(&id.to_be_bytes());
+            b.extend_from_slice(&(d.len() as u32).to_be_bytes());
+            b.extend_from_slice(d);
+        }
+        b
+    }
+
+    #[test]
+    fn metadata_records() {
+        let md = meta(&[
+            (0x1, &2u32.to_be_bytes()),
+            (0x2, &6u32.to_be_bytes()),
+            (0x3, &0x0000_0084u32.to_be_bytes()), // requires licence + EDAT
+            (0x4, &0x1234_5678u64.to_be_bytes()),
+            (0x5, &[0x17, 0x61, 0x01, 0x00]),
+            (0x6, b"NPUB12345\0\0\0"),
+            (0x7, &[0xAB; 24]), // QA digest: known, not shown
+            (0x8, &[0x00, 0x03, 0x41, 0x50, 0x00, 0x00, 0x01, 0x02]),
+            (0xA, b"\0\0\0\0\0\0\0\0NPUB12345-DLC\0\0\0"),
+            (0x99, b"ignored"),
+        ]);
+        let m = Metadata::parse(&md, 10);
+        assert_eq!(m.drm_type, Some(2));
+        assert_eq!(m.content_type, Some(6));
+        assert_eq!(m.needs_licence(), Some(true));
+        assert_eq!(m.package_size, Some(0x1234_5678));
+        assert_eq!(m.package_version.as_deref(), Some("01.00"));
+        assert_eq!(m.title_id.as_deref(), Some("NPUB12345"));
+        assert_eq!(m.min_firmware.as_deref(), Some("03.41"));
+        assert_eq!(m.app_version.as_deref(), Some("01.02"));
+        assert_eq!(m.install_dir.as_deref(), Some("NPUB12345-DLC"));
+        let rows = m.rows();
+        assert_eq!(rows[0], ("Content type", "PS1 Classic (0x6)".into()));
+        assert_eq!(rows[1], ("DRM type", "Local (unverified) (0x2)".into()));
+        assert_eq!(
+            rows[2],
+            ("Package flags", "requires licence, EDAT (0x84)".into())
+        );
+        // count limits what is read; a record running past the end stops the parse, nothing panics.
+        assert_eq!(Metadata::parse(&md, 1).content_type, None);
+        let cut = Metadata::parse(&md[..md.len() - 30], 10);
+        assert_eq!(cut.title_id.as_deref(), Some("NPUB12345"));
+        assert_eq!(cut.install_dir, None);
+        assert_eq!(Metadata::parse(&[0xFF; 7], 5), Metadata::default());
+        let huge = meta(&[(0x1, &[0; 4])]);
+        let mut huge = huge.clone();
+        huge[4..8].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(Metadata::parse(&huge, 1), Metadata::default());
+        for i in 0..300 {
+            let mut b = md.clone();
+            let j = i % b.len();
+            b[j] = noise(1, i as u64)[0];
+            let _ = Metadata::parse(&b, 10).rows();
+        }
+    }
+
+    /// build() leaves 0xC0..0x100 free: put metadata records there (64 bytes at most) and point the header
+    /// at them. The SHA-1 footer is not updated.
+    fn add_meta(b: &mut [u8], records: &[(u32, &[u8])]) {
+        let md = meta(records);
+        assert!(md.len() <= 0x40, "metadata too big for build()'s gap");
+        b[0xC0..0xC0 + md.len()].copy_from_slice(&md);
+        b[0x0C..0x10].copy_from_slice(&(records.len() as u32).to_be_bytes());
+    }
+
+    #[test]
+    fn metadata_from_a_pkg() {
+        let mut b = build(TYPE_RETAIL_PS3, &sample_items());
+        add_meta(
+            &mut b,
+            &[
+                (0x2, &5u32.to_be_bytes()),
+                (0x6, b"NPUB12345\0\0\0"),
+                (0x8, &[0, 0x04, 0x20, 0, 0, 0, 0x01, 0x05]),
+            ],
+        );
+        let (d, p) = write_pkg(&b);
+        let pkg = Pkg::open(&p).unwrap();
+        assert_eq!(pkg.meta.content_type, Some(5));
+        assert_eq!(pkg.meta.min_firmware.as_deref(), Some("04.20"));
+        assert_eq!(pkg.meta.app_version.as_deref(), Some("01.05"));
+        // The usual test pkg has no records.
+        let (d2, p2) = write_pkg(&build(TYPE_RETAIL_PS3, &sample_items()));
+        assert_eq!(Pkg::open(&p2).unwrap().meta, Metadata::default());
+        fs::remove_dir_all(d).unwrap();
+        fs::remove_dir_all(d2).unwrap();
+    }
+
+    #[test]
+    fn parallel_debug_keystream_matches_serial() {
+        let (d, p) = write_pkg(&build(TYPE_DEBUG_PS3, &sample_items()));
+        let h = Pkg::open(&p).unwrap().header;
+        let Keystream::Debug(k) = Keystream::new(&h, Cipher::Debug) else {
+            unreachable!()
+        };
+        for len in [16, 1 << 16, (1 << 20) + 16 * 7, 3 << 20] {
+            let data = noise(len, len as u64);
+            let mut a = data.clone();
+            debug_xor(&k, 12345, &mut a);
+            let mut b = data.clone();
+            Keystream::new(&h, Cipher::Debug).apply(12345, &mut b);
+            assert!(a == b, "len {len}");
+        }
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn head_sfo_and_stream() {
+        let items = sample_items();
+        let (d, p) = write_pkg(&build(TYPE_RETAIL_PSP, &items));
+        let pkg = Pkg::open(&p).unwrap();
+        let eboot = pkg.find("EBOOT.BIN").unwrap();
+        let want = items[2].1.as_ref().unwrap();
+        assert_eq!(pkg.read_head(eboot, 37).unwrap(), want[..37]);
+        assert_eq!(
+            pkg.read_head(pkg.find("odd.txt").unwrap(), 1 << 20)
+                .unwrap()
+                .len(),
+            37
+        );
+        assert_eq!(pkg.sfo().len(), 2);
+        assert_eq!(pkg.sfo()[1], ("TITLE_ID".into(), "NPUB12345".into()));
+        let mut out = vec![];
+        let mut n = 0;
+        let done = pkg
+            .write_entry(eboot, &mut out, &AtomicBool::new(false), &mut |p| {
+                if let Progress::Bytes(b) = p {
+                    n += b
+                }
+            })
+            .unwrap();
+        assert!(done && &out == want && n == want.len() as u64);
+        fs::remove_dir_all(d).unwrap();
+    }
+
     #[test]
     fn free_space_check() {
         let d = tmp("free");
@@ -1914,6 +2269,23 @@ mod tests {
             let n = mb.parse::<usize>().unwrap() << 20;
             items.push(("USRDIR/big.bin", Some(vec![0; n]), 0));
         }
-        fs::write(path, build(t, &items)).unwrap();
+        let mut b = build(t, &items);
+        if std::env::var_os("PKGVIEW_SAMPLE_DEMO").is_some() {
+            // Made-up but plausible metadata: a game, local licence, EBOOT + licence flags, FW 3.40.
+            add_meta(
+                &mut b,
+                &[
+                    (0x1, &2u32.to_be_bytes()),
+                    (0x2, &5u32.to_be_bytes()),
+                    (0x3, &0x06u32.to_be_bytes()),
+                    (0x8, &[0, 0x03, 0x40, 0, 0, 0, 0x01, 0x00]),
+                ],
+            );
+            // Keep `verify` happy: the footer covers the header too.
+            let end = b.len() - FOOTER_LEN as usize;
+            let digest = Sha1::digest(&b[..end]);
+            b[end..end + 20].copy_from_slice(&digest);
+        }
+        fs::write(path, b).unwrap();
     }
 }

@@ -30,11 +30,17 @@ goes to him; see [Credits](#credits).
 - **Bulk extract** (File → Bulk extract to…): pick several `.pkg` files, then the same Extract dialog; each goes
   to `<dest>/<pkg name>/` with its own log. A broken package is reported at the end and doesn't stop the rest.
 - Debug and retail packages, PS3 and PSP keys
+- **Inspector** (F9, the button at the right of the toolbar): select one file to preview it (images, PARAM.SFO
+  as a table, text, or a hex dump of the first 4 KB) with its size, key, offset and flags; with nothing (or several
+  things) selected it shows the package: icon, title, every PARAM.SFO key and the **package metadata** (content
+  type such as Game / PS1 Classic / Theme, DRM type, flags such as "requires licence", package and app version,
+  required system software, install folder). Reading happens off the UI thread.
 - Properties: header fields, content ID, QA digest, SHA-1, PARAM.SFO title info, ICON0.PNG. **Verify** checks
   the SHA-1 and that every file of a known kind (PARAM.SFO, PNG, EBOOT.BIN/SELF/SPRX, PBP, EDAT/SDAT) decrypts to
   its header, which catches a wrong key
 - GNOME Files: package icons as thumbnails; right-click *Extract Here* / *Extract To…* / *Open with PkgView*
-- Headless CLI (`info`, `list`, `extract`, `verify`), man page, bash/zsh/fish completions, `.deb` package
+- Headless CLI (`info`, `list`, `cat`, `extract`, `verify`, each with several packages; `--json` for scripts),
+  man page, bash/zsh/fish completions; `.deb`, `.rpm` and Arch packages
 
 Requirements and roadmap: [PRD.md](PRD.md).
 
@@ -45,9 +51,9 @@ Download the package for your distro from the
 
 | Distro | Install |
 |---|---|
-| Ubuntu 24.04+, Debian 13 | `sudo apt install ./pkgview_2.4.0-1_amd64.deb` (use `apt`, not `dpkg -i`, so dependencies come too) |
-| Fedora 40+ | `sudo dnf install ./pkgview-2.4.0-1.x86_64.rpm` |
-| openSUSE Tumbleweed | `sudo zypper install --allow-unsigned-rpm ./pkgview-2.4.0-1.x86_64.rpm` |
+| Ubuntu 24.04+, Debian 13 | `sudo apt install ./pkgview_2.5.0-1_amd64.deb` (use `apt`, not `dpkg -i`, so dependencies come too) |
+| Fedora 40+ | `sudo dnf install ./pkgview-2.5.0-1.x86_64.rpm` |
+| openSUSE Tumbleweed | `sudo zypper install --allow-unsigned-rpm ./pkgview-2.5.0-1.x86_64.rpm` |
 | Arch | `sudo pacman -S --needed git base-devel && git clone https://github.com/Stolly345/pkgview && cd pkgview/packaging/aur && makepkg -si` |
 
 All four are tested installing and running in clean containers.
@@ -98,12 +104,14 @@ SHA-256) and commit `packaging/aur/PKGBUILD` + `.SRCINFO`.
 
 ```
 pkgview [FILE.pkg]                     # GUI
-pkgview info FILE.pkg                  # header / properties table
-pkgview list FILE.pkg                  # flags, size, path
+pkgview info FILE.pkg…                 # header, package metadata, every PARAM.SFO key
+pkgview list FILE.pkg…                 # flags, size, path
+pkgview cat FILE.pkg PATH              # one file to stdout (e.g. `pkgview cat x.pkg PARAM.SFO | xxd`)
 pkgview extract FILE.pkg… [-o DIR]     # all, into DIR/<pkg name>/ (default DIR: next to each pkg)
 pkgview extract FILE.pkg -o DIR PATH…  # only these files/folders (paths as shown by `list`, without the root)
         [--overwrite skip|replace|rename] [--no-pkg-folder] [--flat]
 pkgview verify FILE.pkg…               # trailing SHA-1 + known-file headers (wrong-key check)
+pkgview info|list|verify --json FILE…  # one JSON object per package per line (JSON Lines)
 pkgview -ex FILE.pkg                   # original PkgView's "extract here" switch
 pkgview --extract-here FILE.pkg…       # GUI progress window only, next to each file
 pkgview --extract-to FILE.pkg…         # GUI: the Extract dialog, then progress window only
@@ -112,6 +120,13 @@ pkgview --extract-to FILE.pkg…         # GUI: the Extract dialog, then progres
 with one package). Several packages are processed one after another; a failure is reported and the rest still
 run. **Exit status: 0** = all OK, **1** = at least one package or entry failed (the count is printed),
 **2** = usage error. `--overwrite` defaults to `replace`, the original's behaviour.
+
+`--json` prints one compact object per package and line, so a single package is plain JSON and several are JSON
+Lines (`pkgview info --json *.pkg | jq -r 'select(.metadata.content_type_name == "PS1 Classic") | .file'`).
+A package that can't be read prints `{"file": …, "error": …}` and still counts as failed. Fields: `info` has the
+header fields, `metadata` (only the records present) and `sfo` (every key, values as strings); `list` has `root`
+and `entries` (`path`, `dir`, `size`, `offset`, `flags`, `key`); `verify` has `ok`, `sha1_ok`, `headers_checked`,
+`headers_wrong`.
 
 Output layout matches the original: `DIR/<pkg name>/<root>/…` plus `DIR/<pkg name>/<pkg name>.log`
 (`[HH:MM:SS] path size bytes OK|FAILED`, then `Extraction completed.` / `Extraction cancelled.`).
@@ -148,6 +163,13 @@ All integers are big-endian.
 | 0x60 | 16 | QA digest |
 | 0x70 | 16 | data RIV (counter IV) |
 | EOF−32 | 20 | SHA-1 |
+
+**Metadata** (not encrypted) starts at the metadata offset: `metadata count` records of `id u32, size u32, data`.
+Decoded as RPCS3's `package_reader::read_metadata` does: `0x1` DRM type, `0x2` content type, `0x3` package flags,
+`0x4` package size, `0x5` package revision (last 2 bytes = version, BCD), `0x6` title ID, `0x8` software revision
+(bytes 1–2 = required system software, 6–7 = app version, BCD), `0xA` install folder (after 8 bytes). Content
+type and flag names are RPCS3's; DRM type names (1 Network, 2 Local, 3 Free) are shown as *unverified*. A
+damaged block only leaves fields empty.
 
 **Encryption** is a keystream XOR over 16-byte blocks; block *n* is at `data_offset + 16n`:
 - retail: `AES-128-ECB(key, data_riv + n)` (a 128-bit big-endian counter, i.e. AES-CTR).
@@ -210,11 +232,15 @@ The first record's data offset is the size of the table plus the names.
 - **Verified:** the SHA-1 covers `[0, EOF−32)` (per psdevwiki); checked on the real packages above.
 - **Verified:** PARAM.SFO layout (little-endian `\0PSF` header, 16-byte index entries); real SFOs parse.
 - **Settled from source, not a sample:** key handling for `0x90` entries in debug pkgs matches RPCS3 (see Differences).
+- **UNVERIFIED on a real package:** the metadata decoding (2.5.0). Its layout and names follow RPCS3's source and
+  are unit-tested on synthetic records, but no real package with metadata was available when it was written
+  (the earlier samples had metadata at `0xC0` and `0x280`; they are no longer on hand).
 
 ## Performance
 
-i7-1260P, NVMe, file in page cache, 1 GiB entry: **retail 1.2 s** (AES-NI, about 870 MB/s, I/O-bound); **debug 7.2 s**
-(one SHA-1 per 16-byte block, CPU-bound; could be parallelised if debug pkgs ever matter). `verify` hashes 1 GiB in 0.7 s.
+i7-1260P (16 threads), NVMe, file in page cache, 1 GiB entry: **retail 1.2 s** (AES-NI, about 870 MB/s,
+I/O-bound); **debug 1.5–1.9 s** (one SHA-1 per 16-byte block, spread over all cores since 2.5.0; it was 7.2 s on
+one core). `verify` hashes 1 GiB in 0.7 s.
 
 ## Legal
 
