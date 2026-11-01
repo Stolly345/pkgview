@@ -25,7 +25,7 @@ On Linux the original Windows tool only runs under Mono: it's slow, works one fi
 
 - Creating or editing packages, debug or retail.
 - PS Vita, PS4 or PS5 packages; EDAT/RAP decryption. Reporting whether a `.rap` file is *present* is in scope (F27).
-- Packaging beyond the `.deb` (translations, Flatpak/AppImage, CI) until there is demand.
+- Packaging beyond `.deb`, `.rpm` and the Arch PKGBUILD (translations, Flatpak/AppImage, CI) until there is demand. (`.rpm` and Arch added 2026-11-01 at the owner's request.)
 - Tabs, skins, cloud or URL opening.
 - Split or multi-part packages, unless a real sample turns up.
 - Generic archive-manager machinery, which buys nothing when an extract takes under a second: pause/resume, a live multi-worker queue, a Preferences window (2026-10-31).
@@ -61,6 +61,7 @@ Thirteen requirement groups shipped in 2.0–2.3; the rest land one release at a
 | F4 | Browse | Folder tree + four views (big icons, small icons, list, details); properties with header, PARAM.SFO and ICON0 | Must | 2.0.0 | Shipped |
 | F5 | CLI | `info`, `list`, `extract`, `verify`, original `-ex` switch | Must | 2.0.0 | Shipped |
 | F6 | Desktop | `.deb`, MIME type with magic match, desktop entry, default-handler action | Must | 2.0.0 | Shipped |
+| F6b | Packaging | Same binary as `.rpm` (Fedora 40+, openSUSE Tumbleweed; `cargo generate-rpm`, requirements = the binary's own sonames) and as an Arch `pkgview-bin` PKGBUILD repackaging the `.deb` (`.SRCINFO` kept current; AUR upload when registration reopens) | Should | 2.4.0 | Shipped |
 | F7 | Bulk | Bulk extract several pkgs to one folder; failures reported at the end, the rest continue | Must | 2.1.0 | Shipped |
 | F8 | Browse | Sortable columns; optional Offset, Key, Flags columns, remembered | Should | 2.2.0 | Shipped |
 | F9 | Browse | Search by substring or `*`/`?` wildcard across all folders; jump to result | Must | 2.2.0 | Shipped |
@@ -183,6 +184,7 @@ A release ships only when all of these hold:
 - [ ] `make compare`: retail identical to the original; debug differs only in `0x90` (or matches once settled from RPCS3)
 - [ ] Every new visible feature exercised in the Xvfb harness and its screenshots inspected; untested paths reported as “built, not exercised”
 - [ ] `.deb` installs cleanly in fresh containers of every supported base (`debian:12` + `ubuntu:24.04` through 2.3.x; `debian:13` + `ubuntu:24.04` from 2.4.0) and runs `--version` + `info`
+- [ ] `.rpm` installs in `fedora:43` and `opensuse/tumbleweed`; `make arch` builds, passes namcap and installs in `archlinux` (from 2.4.0)
 - [ ] Rename and audit tested on a scratch copy of a folder, never on the real collection
 - [ ] Version bumped, metainfo release added and validated, README and this PRD updated
 - [ ] One git commit per phase

@@ -38,13 +38,26 @@ Requirements and roadmap: [PRD.md](PRD.md).
 
 ## Install
 
-Download `pkgview_<version>-1_amd64.deb` from [Releases](https://github.com/Stolly345/pkgview/releases), then:
+One x86-64 build, three package formats, all from [Releases](https://github.com/Stolly345/pkgview/releases):
+
+| Distribution | File | Install |
+| --- | --- | --- |
+| Ubuntu 24.04+, Debian 13+ (and derivatives) | `pkgview_<version>-1_amd64.deb` | `sudo apt install ./pkgview_*_amd64.deb` |
+| Fedora 40+ | `pkgview-<version>-1.x86_64.rpm` | `sudo dnf install ./pkgview-*.x86_64.rpm` |
+| openSUSE Tumbleweed | `pkgview-<version>-1.x86_64.rpm` | `sudo zypper install --allow-unsigned-rpm ./pkgview-*.x86_64.rpm` |
+| Arch and Arch-based | `packaging/aur/PKGBUILD` (`pkgview-bin`) | see below |
+
+Then restart Files (`nautilus -q`) so it loads the right-click menu. Needs GTK ≥ 4.14 and glibc ≥ 2.39; on
+Debian 12 use 2.3.1, the last release for GTK 4.8. Use `apt`/`dnf`/`zypper` on the file, not `dpkg -i`/`rpm -i`:
+they fetch the dependencies. The Files menu needs the Nautilus Python bindings (`python3-nautilus`,
+`nautilus-python`, `python3XX-nautilus`), installed with the package unless you skip recommended packages.
+
+**Arch:** `pkgview-bin` repackages the release `.deb` (same binary). It is not on the AUR yet (AUR account
+registration is closed); build it from this repository:
 ```sh
-sudo apt install ./pkgview_2.4.0-1_amd64.deb
-nautilus -q    # restart Files so it loads the right-click menu
+git clone https://github.com/Stolly345/pkgview && cd pkgview/packaging/aur
+makepkg -si                       # installs gtk4 & co. first; python-nautilus for the Files menu (optional)
 ```
-Needs Ubuntu 24.04+ or Debian 13+ (GTK ≥ 4.14). On Debian 12 use 2.3.1, the last release for GTK 4.8. The Files menu needs `python3-nautilus` (installed with the
-package unless you skip recommended packages).
 
 ## Build
 
@@ -56,13 +69,21 @@ make image    # once: Ubuntu 24.04 + rustup + libgtk-4-dev + cargo-deb (+ Xvfb t
 make test     # unit tests
 make lint     # rustfmt + clippy -D warnings
 make deb      # → target/debian/pkgview_<ver>-1_amd64.deb
+make rpm      # → target/generate-rpm/pkgview-<ver>-1.x86_64.rpm (same binary; after make deb)
+make arch     # PKGBUILD pkgver/sha256 from the .deb, makepkg + namcap + install in archlinux, .SRCINFO
+make packages # all three
 make install  # deb + apt install
 make sample TYPE=0x80000002   # write a synthetic sample.pkg to play with
 make realtest SAMPLES=~/pkgs  # real pkgs (mounted read-only): SHA-1, PARAM.SFO, full extract to a temp dir
 make compare [SAMPLES=~/pkgs] # byte-compare with the original VB code (see Verification status)
 make gui      # drive the GUI under Xvfb, screenshots in target/gui/ (look at them)
 ```
-With a local toolchain (`rustup`, `libgtk-4-dev`, `cargo install cargo-deb`) use `make deb RUN=`.
+With a local toolchain (`rustup`, `libgtk-4-dev`, `cargo install cargo-deb cargo-generate-rpm`) use `make deb RUN=`.
+
+**Release checklist:** `make test lint gui packages`; install the `.deb` in `ubuntu:24.04` and `debian:13`, the
+`.rpm` in `fedora:43` and `opensuse/tumbleweed` (each runs `pkgview --version` + `verify`); `dpkg-deb -f … Maintainer`
+shows the no-reply address; upload exactly the `.deb` and `.rpm` from `target/` (the PKGBUILD pins the `.deb`'s
+SHA-256) and commit `packaging/aur/PKGBUILD` + `.SRCINFO`.
 
 ## Usage
 

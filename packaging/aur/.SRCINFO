@@ -1,0 +1,24 @@
+pkgbase = pkgview-bin
+	pkgdesc = Browse, verify and extract PS3/PSP .pkg installation packages (GTK 4 port of PkgView)
+	pkgver = 2.4.0
+	pkgrel = 1
+	url = https://github.com/Stolly345/pkgview
+	arch = x86_64
+	license = ISC
+	depends = gtk4
+	depends = glib2
+	depends = gdk-pixbuf2
+	depends = pango
+	depends = glibc
+	depends = libgcc
+	depends = hicolor-icon-theme
+	optdepends = python-nautilus: Extract Here / Extract To… / Open with PkgView in the Files right-click menu
+	optdepends = xdg-utils: Tools → Associate .pkg files
+	provides = pkgview
+	conflicts = pkgview
+	options = !debug
+	options = !strip
+	source = https://github.com/Stolly345/pkgview/releases/download/v2.4.0/pkgview_2.4.0-1_amd64.deb
+	sha256sums = d7c78cb32de7ee9a55dd5322b0d902c57422843cfd8661be17863d1d2d31f41a
+
+pkgname = pkgview-bin

@@ -1,0 +1,31 @@
+# Maintainer: Stolly345 <114888417+Stolly345@users.noreply.github.com>
+# Repackages the release .deb (the same binary as the .deb/.rpm; built on Ubuntu 24.04).
+# New release: `make deb arch` sets pkgver + sha256sums from target/debian/ and rewrites .SRCINFO;
+# upload exactly that .deb to the GitHub release, or the checksum won't match.
+pkgname=pkgview-bin
+pkgver=2.4.0
+pkgrel=1
+pkgdesc="Browse, verify and extract PS3/PSP .pkg installation packages (GTK 4 port of PkgView)"
+arch=('x86_64')
+url="https://github.com/Stolly345/pkgview"
+license=('ISC')
+depends=('gtk4' 'glib2' 'gdk-pixbuf2' 'pango' 'glibc' 'libgcc' 'hicolor-icon-theme')
+optdepends=('python-nautilus: Extract Here / Extract To… / Open with PkgView in the Files right-click menu'
+            'xdg-utils: Tools → Associate .pkg files')
+provides=('pkgview')
+conflicts=('pkgview')
+# prebuilt, already stripped release binary
+options=('!debug' '!strip')
+source=("https://github.com/Stolly345/pkgview/releases/download/v${pkgver}/pkgview_${pkgver}-1_amd64.deb")
+sha256sums=('d7c78cb32de7ee9a55dd5322b0d902c57422843cfd8661be17863d1d2d31f41a')
+
+package() {
+    bsdtar -xf data.tar.* -C "$pkgdir"
+    cd "$pkgdir/usr/share"
+    # Arch keeps licences in /usr/share/licenses and has no use for Debian's copyright file
+    install -Dm644 doc/pkgview/LICENSE "licenses/$pkgname/LICENSE"
+    rm -f doc/pkgview/LICENSE doc/pkgview/copyright
+    # zsh looks in site-functions on Arch (vendor-completions is Debian's)
+    install -Dm644 zsh/vendor-completions/_pkgview zsh/site-functions/_pkgview
+    rm -r zsh/vendor-completions
+}

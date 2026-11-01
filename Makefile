@@ -3,7 +3,7 @@
 # With a local toolchain (rustup + libgtk-4-dev + cargo-deb), run with RUN= to skip Docker.
 RUN ?= ./run-in-docker.sh
 
-.PHONY: image build test lint deb install sample realtest compare gui clean
+.PHONY: image build test lint deb rpm arch packages install sample realtest compare gui clean
 
 image:
 	docker build -t pkgview-build -f Dockerfile.build .
@@ -23,6 +23,19 @@ deb:
 	  $$b man | gzip -9n > target/assets/pkgview.1.gz && $$b completions bash > target/assets/pkgview.bash && \
 	  $$b completions zsh > target/assets/_pkgview && $$b completions fish > target/assets/pkgview.fish && cargo deb'
 	@ls -1 target/debian/*.deb
+
+# Same binary and assets as the .deb (run `make deb` first: it builds them).
+rpm:
+	$(RUN) cargo generate-rpm
+	@ls -1 target/generate-rpm/*.rpm
+
+# Arch: packaging/aur/PKGBUILD (pkgview-bin) repackages the .deb. Built and checked in an archlinux container
+# with the local .deb standing in for the release download; also refreshes packaging/aur/.SRCINFO.
+arch:
+	tools/arch-package.sh
+
+# All three, from one build.
+packages: deb rpm arch
 
 install: deb
 	sudo apt install -y ./target/debian/$$(ls -t target/debian | head -1)
