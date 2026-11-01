@@ -53,7 +53,7 @@ Download the package for your distro from the
 All four are tested installing and running in clean containers.
 
 Then restart Files (`nautilus -q`) so it loads the right-click menu. Needs GTK ≥ 4.14 and glibc ≥ 2.39; on
-Debian 12 use 2.3.1, the last release for GTK 4.8. The Files menu needs the Nautilus Python bindings (`python3-nautilus`,
+Debian 12 build 2.3.1 (commit `4bfd30c`, the last version for GTK 4.8) from source. The Files menu needs the Nautilus Python bindings (`python3-nautilus`,
 `nautilus-python`, `python3XX-nautilus`), installed with the package unless you skip recommended packages.
 
 - **Arch and Arch-based:** the PKGBUILD in `packaging/aur` (`pkgview-bin`) repackages the release `.deb`, so

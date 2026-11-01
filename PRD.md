@@ -1,10 +1,10 @@
 # PkgView — Product Requirements Document
 
-2026-10-25 · updated 2026-10-31 after an outside review · 2.4.0 shipped 2026-11-01 · Alex Stoll
+2026-10-25 · updated 2026-10-31 after an outside review · 2.4.0 shipped and published 2026-11-01 · Alex Stoll
 
 ## Overview
 
-PkgView is a native Linux desktop app and CLI that browses, verifies and extracts Sony PS3/PSP `.pkg` installation packages. Version 2.3.1 was the first public release; 2.4.0 is current. It is a Rust/GTK 4 rewrite of PkgView 1.3 (VB.NET/WinForms, 2010–2012, by Ifcaro), shipped as a `.deb`. Through 2.3.x it supports Debian 12+ and Ubuntu 24.04+; from 2.4.0 it supports Debian 13+ and Ubuntu 24.04+ (see Decisions).
+PkgView is a native Linux desktop app and CLI that browses, verifies and extracts Sony PS3/PSP `.pkg` installation packages. Version 2.4.0 is current and is the first published release: public at [github.com/Stolly345/pkgview](https://github.com/Stolly345/pkgview) since 2026-11-01, as a `.deb`, an `.rpm` and an Arch PKGBUILD. (2.3.1 was prepared for release but only ever installed locally.) It is a Rust/GTK 4 rewrite of PkgView 1.3 (VB.NET/WinForms, 2010–2012, by Ifcaro), shipped as a `.deb`. Through 2.3.x it supports Debian 12+ and Ubuntu 24.04+; from 2.4.0 it supports Debian 13+ and Ubuntu 24.04+ (see Decisions).
 
 This PRD fixes what the product must do through 2.7.0: the features already shipped, the ones planned, and the bar each release must clear. Implementation detail lives in `README.md` and the code's tests.
 
@@ -122,6 +122,7 @@ Output must match the original tool byte for byte on every retail package and ev
 | Reliability | One broken package never stops a bulk run, audit or rename; failures name the package and reason; partial files removed; renames are logged and reversible |
 | Accessibility | Built in as each widget is added, not as a separate release: every action reachable by keyboard, labels and tooltips on icon buttons, usable at 200% text scale |
 | Dependencies | Rust std, gtk4-rs (with glib/gio/gdk-pixbuf), aes, sha1, clap, anyhow, libc; new crates need a stated reason (allowed: `clap_complete`, `clap_mangen`). JSON output may add `serde_json` if hand-written output proves error-prone |
+| Attribution | PkgView is a port of Ifcaro's PkgView (github.com/ifcaro/PkgView, ISC) and must say so wherever it is presented: README intro + Credits section, `LICENSE` (his notice first), About dialog, `.deb`/`.rpm` descriptions, metainfo, Arch `pkgdesc`, GitHub repo description and every release's notes. Never removed or shortened |
 | Settings | One file, `~/.config/pkgview/settings.ini` (view, columns, recent files, last extract options, rename template, RPCS3 path) |
 | CLI | Exit codes 0 / 1 / 2 only (F17); machine output on stdout, messages on stderr |
 
@@ -134,8 +135,8 @@ Output must match the original tool byte for byte on every retail package and ev
 | 2.1.1 | A | Code split, extract options, real-pkg tests | Shipped |
 | 2.2.0 | B | Search, sorting, open, drag out | Shipped |
 | 2.3.0 | C | Thumbnails, Files menu, man page | Shipped |
-| 2.3.1 | — | First public release: app ID, homepage, screenshots | Shipped |
-| 2.4.0 | D | **Safety + extract:** symlink-safe writes, exit codes, >4 GiB + `0x90` checks, GTK 4.14 floor, extract dialog, key test, keep opened files until next start (F14–F19) | Shipped |
+| 2.3.1 | — | Release prep: app ID, homepage, screenshots (installed locally, never published as a download) | Shipped |
+| 2.4.0 | D | **Safety + extract:** symlink-safe writes, exit codes, >4 GiB + `0x90` checks, GTK 4.14 floor, extract dialog, key test, keep opened files until next start (F14–F19) | Shipped; published 2026-11-01 (GitHub release v2.4.0: .deb + .rpm; Arch PKGBUILD in the repo) |
 | 2.5.0 | E | **Inspect:** inspector pane + full metadata, `--json`, `cat`, parallel debug keystream (F20–F23) | Next |
 | 2.6.0 | F | **Collection:** rename, audit, library view, `.rap` status, Files columns + Properties tab, Retry failed (F24–F29) | Planned |
 | 2.7.0 | G | **Hand-off:** install to RPCS3; optional diff and DAT check (F30–F32) | Planned |
@@ -189,6 +190,10 @@ A release ships only when all of these hold:
 - [ ] Version bumped, metainfo release added and validated, README and this PRD updated
 - [ ] One git commit per phase
 - [ ] Installed on a real GNOME desktop; thumbnails, the Files menu and (from 2.6.0) the Files columns checked by hand
+- [ ] Ifcaro still credited everywhere listed under Attribution
+- [ ] Commits use the no-reply address (`git log --format=%ae`); only `main` and tags are pushed, never the local `history` branch (it has the private email)
+- [ ] GitHub release in the same format as Kestrel and FinGraph: title "PkgView X.Y.Z", credit line, **What's new**, **Install** table (System / File / Command) with the Arch block, apt-not-dpkg note, **Not supported**, "Tested by installing on …"; marked Latest
+- [ ] The uploaded `.deb` and `.rpm` are exactly the tested files (the PKGBUILD's sha256 matches the uploaded `.deb`), and the README's Arch commands work from GitHub in a fresh `archlinux` container
 
 ## Risks and open questions
 
@@ -203,7 +208,8 @@ The biggest risk is still narrow sample coverage: every real package so far is a
 | Metadata block, DRM type and SFO category codes come from psdevwiki / RPCS3 | Wrong labels in the inspector, rename and audit | Validate on real pkgs; mark unconfirmed fields UNVERIFIED |
 | Rename touches the user's real files | A bad template or bug renames a collection wrongly | Dry-run preview, rename log + undo, tested on a scratch copy only |
 | Install to RPCS3 may not match what RPCS3's own installer does (DLC placement, PS1 Classics) | Games that don't boot in RPCS3 | Compare a PkgView install with an RPCS3 install of the same package file by file before shipping F30 |
-| Raising the floor to GTK 4.14 drops Debian 12 | Debian 12 users stuck on 2.3.x | Accepted 2026-10-31; 2.3.1 `.deb` stays downloadable |
+| Raising the floor to GTK 4.14 drops Debian 12 | Debian 12 users have no package (2.3.1 was never published as a download) | Accepted 2026-10-31; they can build commit `4bfd30c` (2.3.1) from source. Publish a 2.3.1 `.deb` only if someone asks |
+| The AUR doesn't have `pkgview-bin`: registration closed and no account (2026-11-01) | Arch users must clone the repo and run `makepkg -si` | README and release notes say so; upload `packaging/aur` (PKGBUILD + `.SRCINFO`) when registration reopens |
 | Drag-out extracts at drag start (GTK 4 has no XDS) | UI pauses on large drags | 512 MB cap with “Use Extract” message |
 | Nautilus extension API differs between Nautilus 47+ (API 4.1) and 43–46 (API 4.0, incl. Ubuntu 24.04) | Menu items or columns missing on one of them | The extension asks for 4.1 and falls back to 4.0; test columns under both in 2.6.0 |
 | Files columns call `pkgview info --json` per file | Slow listing in a folder of hundreds of pkgs | Run in the background; cache by path + mtime |
