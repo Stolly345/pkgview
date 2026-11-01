@@ -1,5 +1,6 @@
 //! `$XDG_CONFIG_HOME/pkgview/settings.ini`: one key file, written through on every `set`.
 
+use crate::pkg::{ExtractOptions, Overwrite};
 use gtk::glib;
 use std::path::PathBuf;
 
@@ -50,6 +51,52 @@ impl Settings {
 
     pub(super) fn set_list(&self, key: &str, values: &[String]) -> Result<(), glib::Error> {
         self.set(key, &values.join("\n"))
+    }
+
+    fn flag(&self, key: &str, default: bool) -> bool {
+        self.get(key).map_or(default, |v| v == "true")
+    }
+
+    /// Options last used in the Extract dialog. The overwrite policy defaults to Ask.
+    pub(super) fn extract_options(&self) -> ExtractOptions {
+        ExtractOptions {
+            overwrite: match self.get("overwrite").as_deref() {
+                Some("skip") => Overwrite::Skip,
+                Some("replace") => Overwrite::Replace,
+                Some("rename") => Overwrite::Rename,
+                _ => Overwrite::Ask,
+            },
+            pkg_folder: self.flag("pkg_folder", true),
+            keep_paths: self.flag("keep_paths", true),
+        }
+    }
+
+    /// Options for one-click actions (Extract Here, the Files menu): the original layout, with the
+    /// remembered overwrite policy.
+    pub(super) fn quick_options(&self) -> ExtractOptions {
+        ExtractOptions {
+            overwrite: self.extract_options().overwrite,
+            ..ExtractOptions::default()
+        }
+    }
+
+    pub(super) fn set_extract_options(&self, o: &ExtractOptions, open_after: bool) {
+        let ow = match o.overwrite {
+            Overwrite::Ask => "ask",
+            Overwrite::Skip => "skip",
+            Overwrite::Replace => "replace",
+            Overwrite::Rename => "rename",
+        };
+        self.0.set_string(GROUP, "overwrite", ow);
+        self.0
+            .set_string(GROUP, "pkg_folder", &o.pkg_folder.to_string());
+        self.0
+            .set_string(GROUP, "keep_paths", &o.keep_paths.to_string());
+        let _ = self.set("open_after", &open_after.to_string());
+    }
+
+    pub(super) fn open_after(&self) -> bool {
+        self.flag("open_after", false)
     }
 
     pub(super) fn save(&self) -> Result<(), glib::Error> {

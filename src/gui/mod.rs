@@ -6,7 +6,7 @@ mod extract;
 mod settings;
 mod window;
 
-use crate::pkg::{Cipher, Pkg};
+use crate::pkg::{Cipher, ExtractOptions, Pkg};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use settings::Settings;
@@ -91,6 +91,7 @@ struct Job {
     pkg: Option<Arc<Pkg>>,
     paths: Vec<String>,
     dest: PathBuf,
+    opts: ExtractOptions,
 }
 
 /// Back/forward list of visited folders.
@@ -140,6 +141,7 @@ struct Ui {
     window: gtk::ApplicationWindow,
     /// "welcome" (nothing open) or "browser".
     main_stack: gtk::Stack,
+    tree: gtk::ListView,
     tree_sel: gtk::SingleSelection,
     /// The four file views (big/small icons, list, details), one visible.
     views: gtk::Stack,
@@ -162,7 +164,6 @@ struct Ui {
     history: RefCell<History>,
     /// Context menu opened from the tree: act on the whole folder.
     from_tree: Cell<bool>,
-    chooser: RefCell<Option<gtk::FileChooserNative>>,
     /// Label of the tree's root node (shared with the tree factory).
     root_label: Rc<RefCell<String>>,
     settings: Settings,
@@ -176,7 +177,8 @@ pub fn run(file: Option<PathBuf>) -> ExitCode {
         .build();
     app.connect_activate(move |app| window::build_ui(app, file.clone()));
     let code = app.run_with_args::<&str>(&[]);
-    let _ = std::fs::remove_dir_all(extract::open_dir());
+    // Files opened from the package stay until the next start (clean_stale_open_dirs): a viewer may still
+    // be reading them when PkgView quits.
     ExitCode::from(code.value() as u8)
 }
 
@@ -210,17 +212,20 @@ fn close_on_escape(w: &gtk::Window) {
     w.add_controller(c);
 }
 
+/// A modal message: the first line is the heading, the rest the detail. `done` runs once it is closed.
+fn alert(parent: Option<&gtk::Window>, msg: &str, done: impl FnOnce() + 'static) {
+    let (head, detail) = msg.split_once('\n').unwrap_or((msg, ""));
+    gtk::AlertDialog::builder()
+        .modal(true)
+        .message(head)
+        .detail(detail)
+        .build()
+        .choose(parent, gio::Cancellable::NONE, move |_| done());
+}
+
 impl Ui {
     fn error(&self, msg: &str) {
-        let d = gtk::MessageDialog::builder()
-            .transient_for(&self.window)
-            .modal(true)
-            .message_type(gtk::MessageType::Warning)
-            .buttons(gtk::ButtonsType::Ok)
-            .text(msg)
-            .build();
-        d.connect_response(|d, _| d.close());
-        d.present();
+        alert(Some(self.window.upcast_ref()), msg, || {});
     }
 
     /// Spinner + message in the status bar while a background task runs.

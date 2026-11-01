@@ -1,5 +1,6 @@
 //! Main window: menus, folder tree, file views, search, navigation, context menu, actions.
 
+use super::extract::{extract_dialog, last_destination};
 use super::settings::Settings;
 use super::{content_type, History, Job, Pick, Row, Ui, APP_ID};
 use crate::pkg::{self, Pkg};
@@ -407,6 +408,7 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
         window: window.clone(),
         views: views.clone(),
         main_stack,
+        tree: tree.clone(),
         tree_sel: tree_sel.clone(),
         list_store,
         list_sel: list_sel.clone(),
@@ -424,7 +426,6 @@ pub(super) fn build_ui(app: &gtk::Application, file: Option<PathBuf>) {
         folder: RefCell::new(String::new()),
         history: RefCell::new(History::default()),
         from_tree: Cell::new(false),
-        chooser: RefCell::new(None),
         root_label,
         settings,
     });
@@ -769,13 +770,27 @@ impl Ui {
             (0..n).find(|&i| with_row(&self.list_sel.item(i).unwrap(), |r| r.path == path))
         {
             self.list_sel.select_item(i, true);
-            if let Some(v) = self
-                .views
-                .visible_child()
-                .and_downcast::<gtk::ScrolledWindow>()
-            {
-                v.child().map(|c| c.grab_focus());
-            }
+            self.scroll_to(i);
+        }
+    }
+
+    /// Scroll the visible file view to row `pos`, focus it and select only it.
+    fn scroll_to(&self, pos: u32) {
+        let Some(v) = self
+            .views
+            .visible_child()
+            .and_downcast::<gtk::ScrolledWindow>()
+            .and_then(|s| s.child())
+        else {
+            return;
+        };
+        let f = gtk::ListScrollFlags::FOCUS | gtk::ListScrollFlags::SELECT;
+        if let Some(l) = v.downcast_ref::<gtk::ListView>() {
+            l.scroll_to(pos, f, None);
+        } else if let Some(g) = v.downcast_ref::<gtk::GridView>() {
+            g.scroll_to(pos, f, None);
+        } else if let Some(c) = v.downcast_ref::<gtk::ColumnView>() {
+            c.scroll_to(pos, None::<&gtk::ColumnViewColumn>, f, None);
         }
     }
 
@@ -790,6 +805,7 @@ impl Ui {
             let p = row_path(&item);
             if p == path {
                 self.tree_sel.set_selected(i);
+                self.tree.scroll_to(i, gtk::ListScrollFlags::NONE, None);
                 return;
             }
             if p.is_empty() || path.starts_with(&format!("{p}/")) {
@@ -868,60 +884,98 @@ impl Ui {
     }
 
     fn choose(self: &Rc<Self>, pick: Pick) {
-        let (title, action) = match pick {
-            Pick::Open => ("Open PKG", gtk::FileChooserAction::Open),
-            Pick::ExtractTo => ("Extract to", gtk::FileChooserAction::SelectFolder),
-            Pick::BulkFiles => (
-                "Bulk extract: choose .pkg files",
-                gtk::FileChooserAction::Open,
-            ),
-            Pick::BulkDest(_) => ("Bulk extract to", gtk::FileChooserAction::SelectFolder),
-        };
-        let d = gtk::FileChooserNative::new(
-            Some(title),
-            Some(&self.window),
-            action,
-            Some("_Select"),
-            Some("_Cancel"),
-        );
-        if action == gtk::FileChooserAction::Open {
-            let f = gtk::FileFilter::new();
-            f.set_name(Some("PS3 Pkg Files (*.pkg)"));
-            f.add_pattern("*.pkg");
-            f.add_pattern("*.PKG");
-            d.add_filter(&f);
-        }
-        d.set_select_multiple(matches!(pick, Pick::BulkFiles));
-        let ui = self.clone();
-        d.connect_response(move |d, resp| {
-            ui.chooser.take(); // before acting: BulkFiles opens the next chooser
-            let model = d.files();
-            let picked: Vec<PathBuf> = (0..model.n_items())
-                .filter_map(|i| model.item(i).and_downcast::<gio::File>()?.path())
-                .collect();
-            if resp != gtk::ResponseType::Accept || picked.is_empty() {
+        let app = self
+            .window
+            .application()
+            .expect("main window has an application");
+        let pkgs = match pick {
+            Pick::ExtractTo => {
+                let Some((_, path)) = self.pkg.borrow().clone() else {
+                    return;
+                };
+                let next_to = path
+                    .canonicalize()
+                    .ok()
+                    .and_then(|c| c.parent().map(Path::to_path_buf))
+                    .unwrap_or_else(glib::home_dir);
+                let ui = self.clone();
+                let title = format!("Extract from {}", pkg::pkg_name(&path));
+                extract_dialog(
+                    &app,
+                    Some(self.window.upcast_ref()),
+                    &title,
+                    last_destination(next_to),
+                    move |c| ui.extract(c.dest, c.opts, c.open_after),
+                );
                 return;
             }
-            match &pick {
-                Pick::Open => ui.load(&picked[0]),
-                Pick::ExtractTo => ui.extract(picked[0].clone()),
-                Pick::BulkFiles => ui.choose(Pick::BulkDest(picked)),
-                Pick::BulkDest(pkgs) => {
-                    let jobs = pkgs
-                        .iter()
-                        .map(|p| Job {
-                            path: p.clone(),
-                            pkg: None,
-                            paths: vec![],
-                            dest: picked[0].clone(),
-                        })
-                        .collect();
-                    ui.run_jobs(jobs);
+            Pick::BulkDest(pkgs) => pkgs,
+            Pick::Open | Pick::BulkFiles => {
+                let many = matches!(pick, Pick::BulkFiles);
+                let f = gtk::FileFilter::new();
+                f.set_name(Some("PS3/PSP packages (*.pkg)"));
+                f.add_suffix("pkg");
+                let filters = gio::ListStore::new::<gtk::FileFilter>();
+                filters.append(&f);
+                let d = gtk::FileDialog::builder()
+                    .title(if many {
+                        "Bulk extract: choose .pkg files"
+                    } else {
+                        "Open PKG"
+                    })
+                    .modal(true)
+                    .filters(&filters)
+                    .default_filter(&f)
+                    .build();
+                let ui = self.clone();
+                if many {
+                    d.open_multiple(Some(&self.window), gio::Cancellable::NONE, move |r| {
+                        let Ok(model) = r else { return };
+                        let picked: Vec<PathBuf> = (0..model.n_items())
+                            .filter_map(|i| model.item(i).and_downcast::<gio::File>()?.path())
+                            .collect();
+                        if !picked.is_empty() {
+                            ui.choose(Pick::BulkDest(picked));
+                        }
+                    });
+                } else {
+                    d.open(Some(&self.window), gio::Cancellable::NONE, move |r| {
+                        if let Some(p) = r.ok().and_then(|f| f.path()) {
+                            ui.load(&p);
+                        }
+                    });
                 }
+                return;
             }
-        });
-        d.show();
-        *self.chooser.borrow_mut() = Some(d);
+        };
+        let ui = self.clone();
+        let fallback = pkgs
+            .first()
+            .and_then(|p| p.canonicalize().ok()?.parent().map(Path::to_path_buf))
+            .unwrap_or_else(glib::home_dir);
+        let title = match pkgs.len() {
+            1 => format!("Extract {}", pkg::pkg_name(&pkgs[0])),
+            n => format!("Bulk extract {n} packages"),
+        };
+        extract_dialog(
+            &app,
+            Some(self.window.upcast_ref()),
+            &title,
+            last_destination(fallback),
+            move |c| {
+                let jobs = pkgs
+                    .iter()
+                    .map(|p| Job {
+                        path: p.clone(),
+                        pkg: None,
+                        paths: vec![],
+                        dest: c.dest.clone(),
+                        opts: c.opts,
+                    })
+                    .collect();
+                ui.run_jobs(jobs, c.open_after.then(|| c.dest.clone()));
+            },
+        );
     }
 }
 
@@ -1003,7 +1057,7 @@ fn attach_drag(ui: &Rc<Ui>, view: &gtk::Widget) {
     view.add_controller(src);
 }
 
-// ponytail: the tree menu acts on the selected folder, not the row under the pointer (no row hit-test in GTK 4.8).
+/// Right-click menu. In the tree, the folder under the pointer is selected first, so the menu acts on it.
 fn attach_context(ui: &Rc<Ui>, w: &gtk::Widget, menu: &gio::Menu, from_tree: bool) {
     let pop = gtk::PopoverMenu::from_model(Some(menu));
     pop.set_parent(w);
@@ -1020,6 +1074,12 @@ fn attach_context(ui: &Rc<Ui>, w: &gtk::Widget, menu: &gio::Menu, from_tree: boo
         while let Some(h) = hit {
             if h.css_name() == "header" {
                 return;
+            }
+            if let Some(row) = h
+                .downcast_ref::<gtk::TreeExpander>()
+                .and_then(|e| e.list_row())
+            {
+                u.tree_sel.set_selected(row.position());
             }
             hit = h.parent();
         }
@@ -1058,7 +1118,7 @@ fn add_actions(ui: &Rc<Ui>) {
                 .as_ref()
                 .and_then(|(_, p)| p.canonicalize().ok()?.parent().map(Path::to_path_buf));
             if let Some(d) = dir {
-                u.extract(d);
+                u.extract(d, u.settings.quick_options(), false);
             }
         }),
     );

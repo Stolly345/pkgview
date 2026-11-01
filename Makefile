@@ -1,9 +1,9 @@
-# Everything runs in the Debian 12 build container (./run-in-docker.sh) so the .deb's
-# glibc/GTK dependencies stay installable on Debian 12 and Ubuntu 24.04+.
+# Everything runs in the Ubuntu 24.04 build container (./run-in-docker.sh) so the .deb's
+# glibc/GTK (4.14) dependencies stay installable on Ubuntu 24.04+ and Debian 13+.
 # With a local toolchain (rustup + libgtk-4-dev + cargo-deb), run with RUN= to skip Docker.
 RUN ?= ./run-in-docker.sh
 
-.PHONY: image build test lint deb install sample realtest compare clean
+.PHONY: image build test lint deb install sample realtest compare gui clean
 
 image:
 	docker build -t pkgview-build -f Dockerfile.build .
@@ -37,6 +37,10 @@ realtest:
 	@test -d "$(SAMPLES)" || { echo "usage: make realtest SAMPLES=/folder/with/pkgs"; exit 2; }
 	SAMPLES="$(abspath $(SAMPLES))" $(RUN) env PKGVIEW_SAMPLE=/samples \
 	  cargo test --release real_sample -- --ignored --nocapture
+
+# GUI smoke run under Xvfb: screenshots in target/gui/ (inspect them)
+gui:
+	$(RUN) sh -c 'cargo build && tools/gui-harness.sh'
 
 clean:
 	$(RUN) cargo clean

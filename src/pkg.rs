@@ -6,9 +6,11 @@ use aes::cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
 use aes::Aes128;
 use sha1::{Digest, Sha1};
 use std::collections::{BTreeSet, HashSet};
-use std::fs::{self, File};
+use std::ffi::CString;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
-use std::os::unix::fs::FileExt;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -318,7 +320,6 @@ fn sanitize(raw: &[u8]) -> io::Result<String> {
 }
 
 /// What to do when an output file already exists.
-#[allow(dead_code)] // Ask/Skip reach the GUI and CLI in 2.4.0
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Overwrite {
     Ask,
@@ -358,9 +359,92 @@ fn free_name(target: &Path, taken: &HashSet<PathBuf>) -> PathBuf {
                 None => format!("{stem} ({n})"),
             })
         })
-        .find(|c| !c.exists() && !taken.contains(c))
+        .find(|c| !present(c) && !taken.contains(c))
         .unwrap()
 }
+
+/// Something (file, folder, or symlink, even a dangling one) is at `p`.
+fn present(p: &Path) -> bool {
+    fs::symlink_metadata(p).is_ok()
+}
+
+/// Create `top/sub` one level at a time without following symlinks below `top` (`top` itself may be one:
+/// the user chose it). A symlink or file in the way is an error; nothing is ever written through a link.
+fn mkdirs_nofollow(top: &Path, sub: &Path) -> io::Result<()> {
+    let mut cur = top.to_path_buf();
+    for c in sub.components() {
+        cur.push(c);
+        match fs::symlink_metadata(&cur) {
+            Ok(m) if m.is_dir() => {}
+            Ok(m) => {
+                let what = if m.file_type().is_symlink() {
+                    "a symlink"
+                } else {
+                    "a file"
+                };
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("{} is {what}, not a folder", cur.display()),
+                ));
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(&cur)?,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Create or truncate `p`; a symlink at `p` is replaced by the new file, never followed.
+fn create_nofollow(p: &Path) -> io::Result<File> {
+    let open = || {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(p)
+    };
+    match open() {
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            fs::remove_file(p)?; // removes the link itself
+            open()
+        }
+        r => r,
+    }
+}
+
+/// Bytes an unprivileged user may still write on the filesystem holding `dir` (or its nearest existing
+/// parent). None if it can't be determined.
+pub fn free_space(dir: &Path) -> Option<u64> {
+    let p = dir
+        .ancestors()
+        .map(|a| {
+            if a.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                a
+            }
+        })
+        .find(|a| a.exists())?;
+    let c = CString::new(p.as_os_str().as_bytes()).ok()?;
+    // SAFETY: valid NUL-terminated path, zeroed out-struct.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0)
+        .then(|| st.f_bavail as u64 * st.f_frsize as u64)
+}
+
+/// File kinds whose first bytes are known, and those bytes. After decryption with the right key they match;
+/// with the wrong key they are noise.
+const MAGICS: &[(&str, &[&[u8]])] = &[
+    (".SFO", &[b"\0PSF"]),
+    (".PNG", &[b"\x89PNG"]),
+    ("EBOOT.BIN", &[b"SCE\0", b"\x7FELF"]),
+    (".SELF", &[b"SCE\0"]),
+    (".SPRX", &[b"SCE\0", b"\x7FELF"]),
+    (".PBP", &[b"\0PBP"]),
+    (".EDAT", &[b"NPD\0"]),
+    (".SDAT", &[b"NPD\0"]),
+];
 
 /// `*` = any run of characters, `?` = one character; the whole of `s` must match.
 fn glob_match(pat: &[char], s: &[char]) -> bool {
@@ -469,7 +553,8 @@ impl Pkg {
     }
 
     pub fn cipher_for(&self, e: &Entry) -> Cipher {
-        // Deviation: the original used the PSP AES key for 0x90 entries even in debug pkgs; we keep SHA-1.
+        // Debug pkgs: SHA-1 keystream for every entry, as RPCS3's unpkg.cpp does (it ignores the entry key
+        // there). The original used the PSP AES key for 0x90 entries even in debug pkgs.
         if self.header.pkg_type == TYPE_DEBUG_PS3 {
             Cipher::Debug
         } else if e.psp_key() {
@@ -505,11 +590,18 @@ impl Pkg {
             return Err(bad("item table is larger than the file"));
         }
         let tc = self.table_cipher();
-        let mut first = [0u8; 32];
-        self.read_decrypt(tc, 0, &mut first)?;
-        // The first entry's data offset = size of records + names.
-        let table_len = be64(&first, 8);
-        if table_len < n * 32 || table_len > avail {
+        let mut recs = vec![0u8; n as usize * 32];
+        self.read_decrypt(tc, 0, &mut recs)?;
+        // Records, then names. Sized from where the names really end (the original took the first
+        // entry's data offset, which a crafted pkg can point gigabytes away).
+        let table_len = recs
+            .chunks_exact(32)
+            .map(|r| be32(r, 0) as u64 + be32(r, 4) as u64)
+            .max()
+            .unwrap_or(0)
+            .max(n * 32);
+        // ponytail: names are packed after the records in every known pkg; 1 KiB per name is generous.
+        if table_len > avail || table_len > n * (32 + 1024) {
             return Err(bad("corrupt item table"));
         }
         let mut table = vec![0u8; table_len.next_multiple_of(16) as usize];
@@ -654,7 +746,7 @@ impl Pkg {
 
     /// Extract `indices` into `<dir>/<pkg_name>/<root>/…` and write `<pkg_name>.log` next to it, like
     /// the original (`opts` can drop the `<pkg_name>` level or flatten). Returns Ok(false) if cancelled;
-    /// a cancelled or failed file is deleted.
+    /// a cancelled or failed file is deleted. `Overwrite::Ask` replaces (see `extract_asking`).
     pub fn extract(
         &self,
         pkg_name: &str,
@@ -662,19 +754,65 @@ impl Pkg {
         dir: &Path,
         opts: &ExtractOptions,
         cancel: &AtomicBool,
-        mut progress: impl FnMut(Progress),
+        progress: impl FnMut(Progress),
     ) -> io::Result<bool> {
-        let base = if opts.pkg_folder {
-            dir.join(pkg_name)
+        let mut replace = |_: &Path| Overwrite::Replace;
+        self.extract_asking(pkg_name, indices, dir, opts, cancel, progress, &mut replace)
+    }
+
+    /// `extract`, with `ask(existing file)` deciding Skip / Replace / Rename when the policy is Ask.
+    /// Nothing below `dir` is written through a symlink.
+    #[allow(clippy::too_many_arguments)]
+    pub fn extract_asking(
+        &self,
+        pkg_name: &str,
+        indices: &[usize],
+        dir: &Path,
+        opts: &ExtractOptions,
+        cancel: &AtomicBool,
+        mut progress: impl FnMut(Progress),
+        ask: &mut dyn FnMut(&Path) -> Overwrite,
+    ) -> io::Result<bool> {
+        // ponytail: counts every file, also ones Skip will leave alone; good enough to fail early.
+        let need: u64 = indices
+            .iter()
+            .map(|&i| &self.entries[i])
+            .filter(|e| !e.is_dir())
+            .map(|e| e.size)
+            .sum();
+        if let Some(free) = free_space(dir).filter(|&f| need > f) {
+            return Err(io::Error::other(format!(
+                "not enough space in {}: needs {}, {} free",
+                dir.display(),
+                round_bytes(need),
+                round_bytes(free)
+            )));
+        }
+        let base_rel = if opts.pkg_folder {
+            PathBuf::from(pkg_name)
         } else {
-            dir.to_path_buf()
+            PathBuf::new()
         };
+        let base = dir.join(&base_rel);
         let root = base.join(self.header.root_folder());
-        fs::create_dir_all(if opts.keep_paths { &root } else { &base })?;
-        let mut log = BufWriter::new(File::create(base.join(format!("{pkg_name}.log")))?);
+        fs::create_dir_all(dir)?;
+        mkdirs_nofollow(
+            dir,
+            &if opts.keep_paths {
+                base_rel.join(self.header.root_folder())
+            } else {
+                base_rel
+            },
+        )?;
+        let mut log = BufWriter::new(create_nofollow(&base.join(format!("{pkg_name}.log")))?);
         // Files written by this run: a second entry landing on one of them (flattening) is renamed.
         let mut taken = HashSet::new();
         for &i in indices {
+            if cancel.load(Ordering::Relaxed) {
+                writeln!(log, "[{}] Extraction cancelled.", now_hms())?;
+                log.flush()?;
+                return Ok(false);
+            }
             let e = &self.entries[i];
             progress(Progress::File(e));
             let mut target = match (e.is_dir(), opts.keep_paths) {
@@ -683,15 +821,18 @@ impl Pkg {
                 (false, false) => base.join(e.name()),
             };
             let rel = |t: &Path| t.strip_prefix(&base).unwrap_or(t).display().to_string();
+            let below = |t: &Path| t.strip_prefix(dir).unwrap_or(t).to_path_buf();
             let r = if e.is_dir() {
-                fs::create_dir_all(&target).map(|_| true)
+                mkdirs_nofollow(dir, &below(&target)).map(|_| true)
             } else {
                 let policy = if taken.contains(&target) {
                     Overwrite::Rename
-                } else if target.exists() {
-                    opts.overwrite
-                } else {
+                } else if !present(&target) {
                     Overwrite::Replace
+                } else if opts.overwrite == Overwrite::Ask {
+                    ask(&target)
+                } else {
+                    opts.overwrite
                 };
                 match policy {
                     Overwrite::Skip => {
@@ -700,11 +841,15 @@ impl Pkg {
                         continue;
                     }
                     Overwrite::Rename => target = free_name(&target, &taken),
-                    // ponytail: Ask is answered by the GUI in a later version; until then it replaces.
+                    // `ask` answering Ask itself has no better meaning than the original's Replace.
                     Overwrite::Ask | Overwrite::Replace => {}
                 }
                 taken.insert(target.clone());
-                self.extract_file(e, &target, cancel, &mut progress)
+                match target.parent() {
+                    Some(p) => mkdirs_nofollow(dir, &below(p)),
+                    None => Ok(()),
+                }
+                .and_then(|_| self.extract_file(e, &target, cancel, &mut progress))
             };
             match r {
                 Ok(true) if e.is_dir() => {}
@@ -740,11 +885,8 @@ impl Pkg {
         cancel: &AtomicBool,
         progress: &mut impl FnMut(Progress),
     ) -> io::Result<bool> {
-        if let Some(p) = target.parent() {
-            fs::create_dir_all(p)?;
-        }
         let c = self.cipher_for(e);
-        let mut out = BufWriter::new(File::create(target)?);
+        let mut out = BufWriter::new(create_nofollow(target)?);
         let res = (|| {
             let mut buf = vec![0u8; CHUNK];
             let mut done = 0u64;
@@ -767,6 +909,28 @@ impl Pkg {
             let _ = fs::remove_file(target);
         }
         res
+    }
+
+    /// Decrypt the first block of every file of a known kind (PARAM.SFO, PNGs, EBOOT.BIN, SELF/SPRX, PBP,
+    /// EDAT/SDAT) and check its magic: a wrong key choice shows up as a mismatch. (entry index, ok) each.
+    pub fn check_headers(&self) -> Vec<(usize, bool)> {
+        let mut out = vec![];
+        for (i, e) in self.entries.iter().enumerate() {
+            let up = e.name().to_ascii_uppercase();
+            let Some((_, magics)) = MAGICS.iter().find(|(suffix, _)| up.ends_with(suffix)) else {
+                continue;
+            };
+            if e.is_dir() || e.size < 4 {
+                continue;
+            }
+            let mut b = [0u8; 16];
+            let ok = self
+                .read_decrypt(self.cipher_for(e), e.offset, &mut b)
+                .is_ok()
+                && magics.iter().any(|m| b.starts_with(m));
+            out.push((i, ok));
+        }
+        out
     }
 
     /// Compare the trailing digest with SHA-1 of everything before the last 32 bytes (checked on real pkgs).
@@ -1172,6 +1336,17 @@ mod tests {
                 b
             }),
         ];
+        // A name pointing far past the records (the table would be huge) is refused, cheaply.
+        let mut b = build(TYPE_RETAIL_PS3, &[("a", Some(noise(16, 1)), 0)]);
+        let h = Pkg::open(&write_pkg(&b).1).unwrap().header;
+        let rec = &mut b[0x100..0x120];
+        Keystream::new(&h, Cipher::Ps3).apply(0, rec);
+        rec[0..4].copy_from_slice(&0x10_0000u32.to_be_bytes());
+        Keystream::new(&h, Cipher::Ps3).apply(0, rec);
+        b.resize(0x20_0000, 0);
+        let (d, p) = write_pkg(&b);
+        assert!(Pkg::open(&p).is_err(), "far name accepted");
+        fs::remove_dir_all(d).unwrap();
         for (what, bytes) in cases {
             let (d, p) = write_pkg(&bytes);
             assert!(Pkg::open(&p).is_err(), "{what} accepted");
@@ -1245,9 +1420,272 @@ mod tests {
         assert!(root.join("USRDIR/EBOOT (1).BIN").exists());
         run(Overwrite::Rename);
         assert!(root.join("odd (2).txt").exists());
-        run(Overwrite::Ask); // replaces until the GUI answers it
+        run(Overwrite::Ask); // plain extract() has nobody to ask: replaces
         assert_eq!(fs::read(root.join("odd.txt")).unwrap(), good);
+        // extract_asking: the answer is used per file, and only for files that exist.
+        fs::write(root.join("odd.txt"), b"mine").unwrap();
+        let mut asked = vec![];
+        let opts = ExtractOptions {
+            overwrite: Overwrite::Ask,
+            ..Default::default()
+        };
+        let mut ask = |p: &Path| {
+            asked.push(p.file_name().unwrap().to_string_lossy().into_owned());
+            if p.ends_with("odd.txt") {
+                Overwrite::Skip
+            } else {
+                Overwrite::Rename
+            }
+        };
+        assert!(pkg
+            .extract_asking(
+                "g",
+                &idx,
+                &d,
+                &opts,
+                &AtomicBool::new(false),
+                |_| {},
+                &mut ask
+            )
+            .unwrap());
+        asked.sort();
+        assert_eq!(asked, ["EBOOT.BIN", "odd.txt", "zero.bin"]);
+        assert_eq!(fs::read(root.join("odd.txt")).unwrap(), b"mine");
+        assert!(root.join("USRDIR/EBOOT (2).BIN").exists());
         fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn never_writes_through_symlinks() {
+        use std::os::unix::fs::symlink;
+        let (d, p) = write_pkg(&build(TYPE_RETAIL_PS3, &sample_items()));
+        let pkg = Pkg::open(&p).unwrap();
+        let outside = d.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("odd.txt"), b"precious").unwrap();
+        let all = pkg.select(&[""]);
+        let go = |dir: &Path| {
+            pkg.extract(
+                "g",
+                &all,
+                dir,
+                &ExtractOptions::default(),
+                &AtomicBool::new(false),
+                |_| {},
+            )
+        };
+
+        // A symlinked folder inside the destination is refused, nothing lands outside.
+        let out = d.join("out1");
+        fs::create_dir_all(out.join("g/NPUB12345")).unwrap();
+        symlink(&outside, out.join("g/NPUB12345/USRDIR")).unwrap();
+        let err = go(&out).unwrap_err().to_string();
+        assert!(err.contains("is a symlink"), "{err}");
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+
+        // The same for the pkg folder or root folder level.
+        let out = d.join("out2");
+        fs::create_dir_all(&out).unwrap();
+        symlink(&outside, out.join("g")).unwrap();
+        assert!(go(&out).is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+
+        // A symlinked file (also the log) is replaced by a real file; its target is untouched.
+        let out = d.join("out3");
+        fs::create_dir_all(out.join("g/NPUB12345")).unwrap();
+        symlink(outside.join("odd.txt"), out.join("g/NPUB12345/odd.txt")).unwrap();
+        symlink(outside.join("odd.txt"), out.join("g/g.log")).unwrap();
+        symlink(outside.join("nowhere"), out.join("g/NPUB12345/ICON0.PNG")).unwrap(); // dangling
+        assert!(go(&out).unwrap());
+        assert_eq!(fs::read(outside.join("odd.txt")).unwrap(), b"precious");
+        assert!(!outside.join("nowhere").exists());
+        for f in ["g/NPUB12345/odd.txt", "g/g.log", "g/NPUB12345/ICON0.PNG"] {
+            assert!(
+                !fs::symlink_metadata(out.join(f))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{f}"
+            );
+        }
+        assert_eq!(
+            fs::read(out.join("g/NPUB12345/ICON0.PNG")).unwrap(),
+            sample_items()[5].1.clone().unwrap()
+        );
+
+        // A symlink counts as an existing file: Rename writes next to it.
+        let opts = ExtractOptions {
+            overwrite: Overwrite::Rename,
+            ..Default::default()
+        };
+        let out = d.join("out4");
+        fs::create_dir_all(out.join("g/NPUB12345")).unwrap();
+        symlink(outside.join("odd.txt"), out.join("g/NPUB12345/odd.txt")).unwrap();
+        assert!(pkg
+            .extract("g", &all, &out, &opts, &AtomicBool::new(false), |_| {})
+            .unwrap());
+        assert!(out.join("g/NPUB12345/odd (1).txt").is_file());
+        assert_eq!(fs::read(outside.join("odd.txt")).unwrap(), b"precious");
+
+        // The destination itself may be a symlink: the user chose it.
+        let link = d.join("dest-link");
+        symlink(&outside, &link).unwrap();
+        assert!(go(&link).unwrap());
+        assert!(outside.join("g/NPUB12345/odd.txt").is_file());
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn free_space_check() {
+        let d = tmp("free");
+        let free = free_space(&d).unwrap();
+        assert!(free > 0);
+        // Same filesystem via the nearest existing parent (other tests write meanwhile: compare loosely).
+        let below = free_space(&d.join("not/yet/there")).unwrap();
+        assert!(below.abs_diff(free) < 1 << 30, "{below} vs {free}");
+        assert!(free_space(Path::new("relative/dir")).is_some());
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn header_check_finds_wrong_keys() {
+        let png = [b"\x89PNG\r\n\x1a\n".as_slice(), &noise(40, 1)].concat();
+        let items: Vec<Item> = vec![
+            ("PARAM.SFO", Some(sfo(&[("TITLE", "x")])), 0),
+            ("ICON0.PNG", Some(png.clone()), 0),
+            (
+                "USRDIR/EBOOT.BIN",
+                Some([b"SCE\0".as_slice(), &noise(60, 2)].concat()),
+                0,
+            ),
+            (
+                "USRDIR/CONTENT/EBOOT.PBP",
+                Some([b"\0PBP".as_slice(), &noise(30, 3)].concat()),
+                0x9000_0000,
+            ),
+            (
+                "USRDIR/ISO.BIN.EDAT",
+                Some([b"NPD\0".as_slice(), &noise(30, 4)].concat()),
+                0,
+            ),
+            ("USRDIR/fake.png", Some(noise(30, 5)), 0),
+            ("USRDIR/other.bin", Some(noise(30, 6)), 0),
+        ];
+        for t in [TYPE_DEBUG_PS3, TYPE_RETAIL_PS3, TYPE_RETAIL_PSP] {
+            let (d, p) = write_pkg(&build(t, &items));
+            let pkg = Pkg::open(&p).unwrap();
+            let got: Vec<(&str, bool)> = pkg
+                .check_headers()
+                .iter()
+                .map(|&(i, ok)| (pkg.entries[i].path.as_str(), ok))
+                .collect();
+            assert_eq!(
+                got,
+                [
+                    ("PARAM.SFO", true),
+                    ("ICON0.PNG", true),
+                    ("USRDIR/EBOOT.BIN", true),
+                    ("USRDIR/CONTENT/EBOOT.PBP", true),
+                    ("USRDIR/ISO.BIN.EDAT", true),
+                    ("USRDIR/fake.png", false),
+                ],
+                "{t:#x}"
+            );
+            fs::remove_dir_all(d).unwrap();
+        }
+    }
+
+    /// Keystream block `n`, computed independently of `Keystream` (u128 / RPCS3-style counter).
+    fn oracle_block(h: &Header, c: Cipher, n: u64) -> [u8; 16] {
+        match c {
+            Cipher::Debug => {
+                let mut k = [0u8; 64];
+                for (j, half) in [0, 0, 1, 1].iter().enumerate() {
+                    k[j * 8..j * 8 + 8].copy_from_slice(&h.qa_digest[half * 8..half * 8 + 8]);
+                }
+                k[56..].copy_from_slice(&n.to_be_bytes());
+                Sha1::digest(k)[..16].try_into().unwrap()
+            }
+            Cipher::Ps3 | Cipher::Psp => {
+                let key = if c == Cipher::Ps3 { PS3_KEY } else { PSP_KEY };
+                let ctr = u128::from_be_bytes(h.data_riv).wrapping_add(n as u128);
+                let mut b = GenericArray::from(ctr.to_be_bytes());
+                Aes128::new(&key.into()).encrypt_block(&mut b);
+                b.as_slice().try_into().unwrap()
+            }
+        }
+    }
+
+    fn oracle_xor(h: &Header, c: Cipher, first: u64, buf: &mut [u8]) {
+        for (i, blk) in buf.chunks_mut(16).enumerate() {
+            let k = oracle_block(h, c, first + i as u64);
+            blk.iter_mut().zip(k).for_each(|(b, k)| *b ^= k);
+        }
+    }
+
+    /// An entry stored 4 GiB+ into the data section (sparse file, no real disk use) decrypts correctly:
+    /// guards against 32-bit offsets or block counters anywhere on the read path.
+    #[test]
+    fn entry_beyond_4gib() {
+        const FAR: u64 = 0x1_0000_0040;
+        let plain = noise(40, 77);
+        for (t, hi) in [
+            (TYPE_DEBUG_PS3, 0),
+            (TYPE_RETAIL_PS3, 0),
+            (TYPE_RETAIL_PS3, 0x9000_0000),
+            (TYPE_RETAIL_PSP, 0x9000_0000),
+        ] {
+            let items: Vec<Item> = vec![
+                ("first.bin", Some(noise(16, 1)), 0),
+                ("big.bin", Some(plain.clone()), hi),
+            ];
+            let mut bytes = build(t, &items);
+            let (d, p) = write_pkg(&bytes);
+            let h = Pkg::open(&p).unwrap().header;
+            let table_c = match t {
+                TYPE_DEBUG_PS3 => Cipher::Debug,
+                TYPE_RETAIL_PSP => Cipher::Psp,
+                _ => Cipher::Ps3,
+            };
+            let item_c = match (t, hi) {
+                (TYPE_DEBUG_PS3, _) => Cipher::Debug,
+                (_, 0x9000_0000) => Cipher::Psp,
+                _ => Cipher::Ps3,
+            };
+            // Move the entry: rewrite its record's data offset, then put the data at FAR.
+            let rec = &mut bytes[0x120..0x140]; // record 1 = blocks 2 and 3
+            oracle_xor(&h, table_c, 2, rec);
+            rec[8..16].copy_from_slice(&FAR.to_be_bytes());
+            oracle_xor(&h, table_c, 2, rec);
+            fs::write(&p, &bytes).unwrap();
+            let mut data = plain.clone();
+            data.resize(48, 0);
+            oracle_xor(&h, item_c, FAR / 16, &mut data);
+            let f = OpenOptions::new().write(true).open(&p).unwrap();
+            f.write_all_at(&data, 0x100 + FAR).unwrap();
+            f.set_len(0x100 + FAR + 48 + FOOTER_LEN).unwrap();
+            drop(f);
+
+            let pkg = Pkg::open(&p).unwrap();
+            assert_eq!(pkg.entries[1].offset, FAR);
+            assert_eq!(
+                pkg.read_entry(&pkg.entries[1]).unwrap(),
+                plain,
+                "{t:#x} {hi:#x}"
+            );
+            assert!(pkg
+                .extract(
+                    "g",
+                    &[1],
+                    &d,
+                    &ExtractOptions::default(),
+                    &AtomicBool::new(false),
+                    |_| {}
+                )
+                .unwrap());
+            assert_eq!(fs::read(d.join("g/NPUB12345/big.bin")).unwrap(), plain);
+            fs::remove_dir_all(d).unwrap();
+        }
     }
 
     #[test]
@@ -1462,6 +1900,12 @@ mod tests {
                     0,
                 ),
             ];
+        }
+        // A real EBOOT.BIN is a SELF: give the synthetic one its header so `verify` passes.
+        for it in items.iter_mut().filter(|i| i.0.ends_with("EBOOT.BIN")) {
+            if let Some(d) = it.1.as_mut() {
+                d[..4].copy_from_slice(b"SCE\0");
+            }
         }
         if std::env::var_os("PKGVIEW_SAMPLE_NOICON").is_some() {
             items.retain(|i| i.0 != "ICON0.PNG");

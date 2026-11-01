@@ -5,21 +5,32 @@ This is a Rust/GTK 4 port of [PkgView 1.3](https://github.com/ifcaro/PkgView) (V
 
 ![PkgView browsing a package](data/screenshots/main.png)
 
-- Folder tree + file list (big icons / small icons / list / details), right-click extract
+- Folder tree + file list (big icons / small icons / list / details), right-click extract (in the tree, the
+  folder under the pointer)
 - Details columns: Name, Size, Type, plus Offset, Key (PS3/PSP/Debug) and Flags (right-click the header);
   click a header to sort, folders stay first; visible columns are remembered
 - **Search** (Ctrl+F): substring of the path, or `*`/`?` wildcards; results list every folder, double-click
-  jumps to the file
+  jumps to the file (selected and scrolled into view)
 - Path bar with Back / Forward / Up (Alt+←/→/↑, Backspace); keyboard shortcuts under Help → Keyboard Shortcuts
 - **Open a file** (double-click / Enter) with its default application, and **drag files out** to a file manager.
-  Both extract to `~/.cache/pkgview/open/<pid>/` first, which is deleted when PkgView exits (leftovers from a
-  crash are removed at the next start). Drag-out is capped at 512 MB: GTK 4 has no way to let the drop target
+  Both extract to `~/.cache/pkgview/open/<pid>/` first, which is deleted the next time PkgView starts (not at
+  exit: an image viewer may still be reading the file). Drag-out is capped at 512 MB: GTK 4 has no way to let the drop target
   choose the destination, so the files are extracted when the drag starts.
 - Open Recent + a welcome page; drop one `.pkg` to open it, or several / a folder to bulk-extract them
-- **Bulk extract** (File → Bulk extract to…): pick several `.pkg` files and one destination; each goes to
-  `<dest>/<pkg name>/` with its own log. A broken package is reported at the end and doesn't stop the rest.
+- **Extract dialog** (Ctrl+E): destination (typed, browsed or one of the last 8), create a folder named after the
+  package, keep the folder structure or flatten, open the destination when done, and what to do with existing
+  files: **Ask** (Skip / Skip All / Keep Both / Replace / Replace All), Skip, Replace, or Keep both (`name (1).ext`).
+  The choices are remembered. *Extract to source folder* and the Files menu's *Extract Here* keep the original
+  layout but use the remembered overwrite rule. Extraction stops before writing anything if the destination
+  lacks the space.
+- **Never writes through a symlink** below the destination: a symlinked folder in the way is an error, a
+  symlinked file is replaced by the real file (its target is untouched).
+- **Bulk extract** (File → Bulk extract to…): pick several `.pkg` files, then the same Extract dialog; each goes
+  to `<dest>/<pkg name>/` with its own log. A broken package is reported at the end and doesn't stop the rest.
 - Debug and retail packages, PS3 and PSP keys
-- Properties: header fields, content ID, QA digest, SHA-1 (with **Verify**), PARAM.SFO title info, ICON0.PNG
+- Properties: header fields, content ID, QA digest, SHA-1, PARAM.SFO title info, ICON0.PNG. **Verify** checks
+  the SHA-1 and that every file of a known kind (PARAM.SFO, PNG, EBOOT.BIN/SELF/SPRX, PBP, EDAT/SDAT) decrypts to
+  its header, which catches a wrong key
 - GNOME Files: package icons as thumbnails; right-click *Extract Here* / *Extract To…* / *Open with PkgView*
 - Headless CLI (`info`, `list`, `extract`, `verify`), man page, bash/zsh/fish completions, `.deb` package
 
@@ -29,19 +40,19 @@ Requirements and roadmap: [PRD.md](PRD.md).
 
 Download `pkgview_<version>-1_amd64.deb` from [Releases](https://github.com/Stolly345/pkgview/releases), then:
 ```sh
-sudo apt install ./pkgview_2.3.1-1_amd64.deb
+sudo apt install ./pkgview_2.4.0-1_amd64.deb
 nautilus -q    # restart Files so it loads the right-click menu
 ```
-Needs Debian 12+ or Ubuntu 24.04+ (GTK ≥ 4.8). The Files menu needs `python3-nautilus` (installed with the
+Needs Ubuntu 24.04+ or Debian 13+ (GTK ≥ 4.14). On Debian 12 use 2.3.1, the last release for GTK 4.8. The Files menu needs `python3-nautilus` (installed with the
 package unless you skip recommended packages).
 
 ## Build
 
-The host only needs Docker: everything builds in a Debian 12 container (`Dockerfile.build`). Debian 12 is the
-oldest target, so the binary's glibc and GTK requirements are satisfied on Debian 12 and anything newer.
+The host only needs Docker: everything builds in an Ubuntu 24.04 container (`Dockerfile.build`). Ubuntu 24.04 is
+the oldest target (GTK 4.14, glibc 2.39), so the binary's requirements are met there and on Debian 13 and newer.
 
 ```sh
-make image    # once: Debian 12 + rustup + libgtk-4-dev + cargo-deb
+make image    # once: Ubuntu 24.04 + rustup + libgtk-4-dev + cargo-deb (+ Xvfb tools for `make gui`)
 make test     # unit tests
 make lint     # rustfmt + clippy -D warnings
 make deb      # → target/debian/pkgview_<ver>-1_amd64.deb
@@ -49,6 +60,7 @@ make install  # deb + apt install
 make sample TYPE=0x80000002   # write a synthetic sample.pkg to play with
 make realtest SAMPLES=~/pkgs  # real pkgs (mounted read-only): SHA-1, PARAM.SFO, full extract to a temp dir
 make compare [SAMPLES=~/pkgs] # byte-compare with the original VB code (see Verification status)
+make gui      # drive the GUI under Xvfb, screenshots in target/gui/ (look at them)
 ```
 With a local toolchain (`rustup`, `libgtk-4-dev`, `cargo install cargo-deb`) use `make deb RUN=`.
 
@@ -58,13 +70,19 @@ With a local toolchain (`rustup`, `libgtk-4-dev`, `cargo install cargo-deb`) use
 pkgview [FILE.pkg]                     # GUI
 pkgview info FILE.pkg                  # header / properties table
 pkgview list FILE.pkg                  # flags, size, path
-pkgview extract FILE.pkg [-o DIR]      # all, into DIR/<pkg name>/ (default DIR: next to the pkg)
+pkgview extract FILE.pkg… [-o DIR]     # all, into DIR/<pkg name>/ (default DIR: next to each pkg)
 pkgview extract FILE.pkg -o DIR PATH…  # only these files/folders (paths as shown by `list`, without the root)
-pkgview verify FILE.pkg                # check trailing SHA-1
+        [--overwrite skip|replace|rename] [--no-pkg-folder] [--flat]
+pkgview verify FILE.pkg…               # trailing SHA-1 + known-file headers (wrong-key check)
 pkgview -ex FILE.pkg                   # original PkgView's "extract here" switch
 pkgview --extract-here FILE.pkg…       # GUI progress window only, next to each file
-pkgview --extract-to FILE.pkg…         # GUI: choose a folder, then progress window only
+pkgview --extract-to FILE.pkg…         # GUI: the Extract dialog, then progress window only
 ```
+`extract` arguments after the first that end in `.pkg` are more packages; anything else is an inner PATH (only
+with one package). Several packages are processed one after another; a failure is reported and the rest still
+run. **Exit status: 0** = all OK, **1** = at least one package or entry failed (the count is printed),
+**2** = usage error. `--overwrite` defaults to `replace`, the original's behaviour.
+
 Output layout matches the original: `DIR/<pkg name>/<root>/…` plus `DIR/<pkg name>/<pkg name>.log`
 (`[HH:MM:SS] path size bytes OK|FAILED`, then `Extraction completed.` / `Extraction cancelled.`).
 `<root>` is the content ID's middle part minus `_00`, e.g. `UP0001-NPUB12345_00-…` → `NPUB12345`.
@@ -119,20 +137,26 @@ The first record's data offset is the size of the table plus the names.
 
 - **Seeking is O(1).** The original stepped the counter block by block in a busy thread to reach a file.
 - Names are read through `name_offset`. The original assumed names are packed and 16-aligned; tests check
-  that both give the same result for packed pkgs.
+  that both give the same result for packed pkgs. The item table is sized from where the names end; the original
+  used the first entry's data offset, which a crafted pkg can point gigabytes away (found by the >4 GiB test).
 - The last partial block is handled with `ceil(size/16)` blocks. The original used rounding division plus one
   extra block; it gives the same bytes, partly because `AESEngine` caches the first key until `free()`.
 - Untrusted input is checked: `..`, absolute paths, NUL and `\` in names are rejected, every offset is
   bounds-checked against the file size, and `item_count` and the table size are capped before allocating.
 - The pkg is opened read-only (the original used ReadWrite). A cancelled or failed file is deleted.
 - In debug pkgs, `0x90` entries also use the SHA-1 scheme. The original ran the PSP AES key over the 64-byte debug key
-  buffer there, so its output for those entries differs (confirmed by `tools/compare-with-original.sh`). The port's
-  choice is the consistent one, but no real debug pkg with `0x90` entries was available to settle it.
+  buffer there, so its output for those entries differs (confirmed by `tools/compare-with-original.sh`). **RPCS3
+  agrees with the port**: its `rpcs3/Crypto/unpkg.cpp` (`package_reader::decrypt`) uses the SHA-1 keystream for
+  every entry of a debug pkg and ignores the entry's key there (checked 2026-10-31).
+- Known difference from RPCS3, kept to stay byte-identical with the original: RPCS3 picks the PSP key by flag bit
+  `0x10000000`, the original (and the port) by top byte `== 0x90`; and RPCS3 decrypts the *names* of PSP entries
+  with the PSP key in retail PS3 pkgs too, where the original uses the table's key. They agree on every package
+  whose PSP entries are flagged `0x90…` (all samples so far). Revisit if a retail pkg with `0x10…`/`0x30…`
+  entries, or garbled names, turns up.
 - The dead "New / Save / Save as…" menu items are gone. "Associate" uses `xdg-mime` instead of the registry.
 - The progress window does not lock the main window. The total progress bar is by bytes, not file count.
 - The app ID / desktop file is `io.github.stolly345.pkgview(.desktop)`, not `pkgview.desktop`. A GTK app ID needs a dot,
   and on Wayland the desktop file name has to match the app ID for the window icon to show.
-- The tree's right-click menu acts on the selected folder, not the row under the pointer (GTK 4.8 has no row hit-test).
 - Type 2 (debug PSP) is rejected, like the original.
 
 ## Verification status
@@ -148,9 +172,14 @@ The first record's data offset is the size of the table plus the names.
   bytes. No retail, PSP, >4 GB or split pkgs were available.
 - The other crypto and format tests in `src/pkg.rs` run against **synthetic** pkgs built by a test-only writer
   that uses the same keystream code. They catch regressions and bad bounds handling, not a misreading of the format.
+  Exception: `entry_beyond_4gib` encrypts with an independent counter (u128 / RPCS3-style) and puts an entry
+  4 GiB into a sparse file, for all three key types: no 32-bit offset or counter on the read path.
+- **Header check magic bytes** (`verify`, Properties → Verify) were compared with the files of a real PS3 disc
+  game folder: `PARAM.SFO` `\0PSF`, `ICON0/PIC1.PNG` `\x89PNG`, `EBOOT.BIN` and `.self` `SCE\0`. PBP/EDAT/SDAT
+  magics come from psdevwiki and are unconfirmed on a real file.
 - **Verified:** the SHA-1 covers `[0, EOF−32)` (per psdevwiki); checked on the real packages above.
 - **Verified:** PARAM.SFO layout (little-endian `\0PSF` header, 16-byte index entries); real SFOs parse.
-- **UNVERIFIED:** key handling for `0x90` entries in debug pkgs (see Differences); none of the real samples has one.
+- **Settled from source, not a sample:** key handling for `0x90` entries in debug pkgs matches RPCS3 (see Differences).
 
 ## Performance
 

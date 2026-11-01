@@ -74,7 +74,10 @@ impl Ui {
         )));
         b.append(&line(&format!("SHA-1: {}", pkg::hex_spaced(&h.sha1))));
 
-        let verify = gtk::Button::with_label("Verify SHA-1");
+        let verify = gtk::Button::with_label("Verify");
+        verify.set_tooltip_text(Some(
+            "Check the SHA-1 digest, and that known files (PARAM.SFO, PNG, EBOOT…) decrypt to their headers",
+        ));
         let result = gtk::Label::new(None);
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         row.append(&verify);
@@ -87,11 +90,29 @@ impl Ui {
             let result = result.clone();
             let btn = btn.clone();
             glib::spawn_future_local(async move {
-                let r = gio::spawn_blocking(move || p.verify_sha1()).await;
-                result.set_text(match r {
-                    Ok(Ok(true)) => "OK (matches)",
-                    Ok(Ok(false)) => "MISMATCH",
-                    _ => "Error reading file",
+                let r = gio::spawn_blocking(move || {
+                    let sha = p.verify_sha1()?;
+                    let checks = p.check_headers();
+                    let bad: Vec<String> = checks
+                        .iter()
+                        .filter(|c| !c.1)
+                        .map(|&(i, _)| p.entries[i].name().to_string())
+                        .collect();
+                    std::io::Result::Ok((sha, checks.len(), bad))
+                })
+                .await;
+                result.set_text(&match r {
+                    Ok(Ok((sha, n, bad))) => {
+                        let sha = if sha { "SHA-1 OK" } else { "SHA-1 MISMATCH" };
+                        match (n, bad.len()) {
+                            (0, _) => format!("{sha} · no known file headers to check"),
+                            (n, 0) => format!("{sha} · {n} known files decrypt correctly"),
+                            (n, b) => {
+                                format!("{sha} · {b} of {n} known files WRONG: {}", bad.join(", "))
+                            }
+                        }
+                    }
+                    _ => "Error reading file".into(),
                 });
                 btn.set_sensitive(true);
             });

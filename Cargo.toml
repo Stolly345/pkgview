@@ -1,6 +1,6 @@
 [package]
 name = "pkgview"
-version = "2.3.1"
+version = "2.4.0"
 edition = "2021"
 rust-version = "1.82"
 license = "ISC"
@@ -18,7 +18,7 @@ clap_complete = "4"
 clap_mangen = "0.2"
 anyhow = "1"
 libc = "0.2"
-gtk = { package = "gtk4", version = "0.9", features = ["v4_8"] }
+gtk = { package = "gtk4", version = "0.9", features = ["v4_14"] }
 
 [profile.release]
 lto = true
@@ -30,7 +30,7 @@ maintainer = "Alex Stoll <114888417+Stolly345@users.noreply.github.com>"
 copyright = "2010-2012 Ifcaro; 2026 Alex Stoll (Rust port)"
 section = "utils"
 priority = "optional"
-depends = "$auto, libgtk-4-1 (>= 4.8)"
+depends = "$auto, libgtk-4-1 (>= 4.14)"
 recommends = "python3-nautilus"
 extended-description = """\
 PkgView lists the contents of PS3/PSP .pkg installation packages (debug and \

@@ -5,7 +5,7 @@ import gi
 try:
     gi.require_version("Nautilus", "4.1")  # Nautilus 47+ (Ubuntu 26.04)
 except ValueError:
-    gi.require_version("Nautilus", "4.0")  # Nautilus 43-46 (Debian 12)
+    gi.require_version("Nautilus", "4.0")  # Nautilus 43-46 (e.g. Ubuntu 24.04)
 from gi.repository import Gio, GObject, Nautilus
 
 PKGVIEW = "/usr/bin/pkgview"  # absolute: a ~/.local/bin/pkgview must not shadow it
